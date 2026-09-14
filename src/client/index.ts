@@ -1,24 +1,31 @@
 /**
  * The web renderer plugin.
  *
- * It registers one entry into the shell's `shell.overlay` slot and draws the
- * core's projection there. `ui-layout` owns that slot, so this plugin only works
- * while that plugin is mounted — which is the arrangement the design chose for
- * the first step, before the frame tree replaces the shell outright.
+ * It registers one entry into the shell's `root` slot and draws the core's
+ * projection there, filling the window: with the compatibility layer mounted,
+ * this *is* the shell.
  *
- * The layer occupies a bounded region and covers nothing: the shell's own chrome
- * stays visible and usable, and the pointer passes through everywhere except the
- * frames themselves.
+ * Almost nothing here decides anything. A key chord and a pointer drag both
+ * reduce to a `FrameGesture` (see `./gestures.ts`) and both leave through
+ * `./execute.ts`, so the renderer owns drawing and hit-testing and nothing else.
+ * During a drag it keeps a preview in its own closure and calls neither: the
+ * tree changes once, when the pointer is released.
  *
  * The build concatenates this file after the core's modules, so the relative
- * import below is erased and these names come from that shared scope. Only `react`
+ * import below is erased and those names come from that shared scope. Only `react`
  * survives as a real import, answered by the shell's seeded module table.
  */
-import { createElement, useEffect, useSyncExternalStore } from 'react'
-import {
-  REACT_CAPABILITIES, provideFramesService, project,
+import { createElement, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { REACT_CAPABILITIES, provideFramesService, project } from '../../../frames/src/index.ts'
+import type {
+  FrameTypeDefinition, FramesService, NormalizedRect, PaneId, TabId,
 } from '../../../frames/src/index.ts'
-import type { FramesService, FrameTypeDefinition } from '../../../frames/src/index.ts'
+import {
+  chordGesture, dividerDelta, draggedFloatRect, dragSizes, dropPreview, releaseGesture,
+  resizedFloatRect,
+} from './gestures.ts'
+import type { Chord, DragSession, FrameGesture, GestureContext, GestureDivider, Point } from './gestures.ts'
+import { execute } from './execute.ts'
 
 /** Services this plugin needs before it activates. */
 export const inject = ['slots']
@@ -26,8 +33,8 @@ export const inject = ['slots']
 /** The type the shell opens with. The compatibility layer supplies its body. */
 const CONVERSATION: FrameTypeDefinition = { id: 'legacy.conversation', title: () => 'Conversation' }
 
-/** Which way a split runs. */
-type SplitAxis = 'row' | 'column'
+/** How wide a divider's grab handle is drawn, in pixels. */
+const DIVIDER_GRAB = 7
 
 /** The projection the layer draws. */
 interface Snapshot {
@@ -43,6 +50,67 @@ const viewport = (): { width: number; height: number } => ({
   height: window.innerHeight,
 })
 
+/** A pointer position as a fraction of the drawable area. */
+const at = (event: { readonly clientX: number; readonly clientY: number }): Point => {
+  const extent = viewport()
+  return { x: event.clientX / extent.width, y: event.clientY / extent.height }
+}
+
+/** What the layer is in the middle of, if anything. Never reaches the tree. */
+type Active =
+  | { readonly kind: 'chip'; readonly session: DragSession; readonly seed: string }
+  | {
+    readonly kind: 'float'
+    readonly paneId: PaneId
+    readonly corner: 'se' | undefined
+    readonly start: NormalizedRect
+    readonly from: Point
+  }
+  | { readonly kind: 'divider'; readonly divider: GestureDivider; readonly from: Point }
+
+/** A rectangle as CSS, pinned to the normalized area it describes. */
+function area(rect: NormalizedRect): Record<string, string> {
+  return {
+    position: 'absolute',
+    boxSizing: 'border-box',
+    left: `calc(${rect.x * 100}% + 1px)`,
+    top: `calc(${rect.y * 100}% + 1px)`,
+    width: `calc(${rect.width * 100}% - 2px)`,
+    height: `calc(${rect.height * 100}% - 2px)`,
+  }
+}
+
+/**
+ * Read a key event as a chord, or `undefined` when it is not one.
+ *
+ * `C-x` arms the default map's prefix, and the chord after it may carry a second
+ * modifier, so `C-x C-d` closes while `C-x d` docks. Only two splits are bound:
+ * up and left are the pointer's job, because a drag names the side by landing on
+ * it and no chord has to encode that.
+ * @param event - the key event.
+ * @param prefix - whether `C-x` was pressed just before.
+ * @returns the chord, in the design's notation.
+ */
+export function readChord(event: KeyboardEvent, prefix: boolean): Chord | undefined {
+  const key = event.key.toLowerCase()
+  if (prefix) {
+    if (key === 'f') return 'C-x f'
+    if (key === 'd') return event.ctrlKey ? 'C-x C-d' : 'C-x d'
+    // The arrow keys keep their `Arrow` name; the design writes them short.
+    if (key === 'arrowright' || key === 'right') return 'C-x right'
+    if (key === 'arrowdown' || key === 'down') return 'C-x down'
+    return undefined
+  }
+  if (!event.altKey) return undefined
+  switch (key) {
+    case 'h': return 'M-h'
+    case 'j': return 'M-j'
+    case 'k': return 'M-k'
+    case 'l': return 'M-l'
+    default: return undefined
+  }
+}
+
 /**
  * The layer's view of the shared tree.
  *
@@ -50,7 +118,7 @@ const viewport = (): { width: number; height: number } => ({
  * it measured, so the compatibility layer and any other renderer drive the same
  * tree through the same service.
  * @param service - the frame tree published by this plugin.
- * @returns the readable snapshot plus the intents this layer can send.
+ * @returns the readable snapshot plus the one way to change it.
  */
 function createController(service: FramesService) {
   let snapshot: Snapshot = { view: service.project() }
@@ -62,9 +130,15 @@ function createController(service: FramesService) {
   })
   service.reportMeasurements({ viewport: viewport() })
 
-  /** Send an intent; the layer draws no chrome, so a refusal lands in the console. */
-  const send = (result: { ok: boolean; code?: string; message?: string }): void => {
-    if (!result.ok) console.warn(`[frames] ${result.code}: ${result.message}`)
+  const context = (seed: string): GestureContext => {
+    const view = snapshot.view
+    const focused = view.docked.find((pane) => pane.id === view.active)
+    return {
+      activePaneId: view.active,
+      activeTabId: focused?.tabs.find((tab) => tab.active)?.id,
+      seed,
+      panes: view.docked.map((pane) => ({ id: pane.id, rect: pane.rect })),
+    }
   }
 
   return {
@@ -73,131 +147,303 @@ function createController(service: FramesService) {
       return () => { listeners.delete(listener) }
     },
     getSnapshot: (): Snapshot => snapshot,
+    /** What a chord or a drag acts on, read fresh from the last projection. */
+    context,
+    /** The type a split seeds with: whatever the focused frame is showing. */
+    seed(): string {
+      const view = snapshot.view
+      const focused = view.docked.find((pane) => pane.id === view.active)
+      return focused?.tabs.find((tab) => tab.active)?.typeId ?? CONVERSATION.id
+    },
     remeasure(): void {
       service.reportMeasurements({ viewport: viewport() })
     },
-    split(): void { send(service.split(undefined, CONVERSATION.id)) },
-    close(): void { send(service.close()) },
-    float(): void { send(service.float()) },
-    dock(): void { send(service.dock()) },
-    focus(direction: 'left' | 'right' | 'up' | 'down'): void { send(service.moveFocus(direction)) },
-    focusPane(paneId: string): void { send(service.focus(paneId as never)) },
+    /** Run exactly one gesture. One gesture, one call, one history entry. */
+    dispatch(gesture: FrameGesture): void {
+      execute(service, gesture)
+    },
   }
 }
 
 /**
- * The layer entry: the frame tree alone, with no chrome of its own.
+ * The layer entry: the frame tree, drawn as the window itself.
  * @returns the frame layer.
  */
-function createOverlay(controller: ReturnType<typeof createController>) {
+function createLayer(controller: ReturnType<typeof createController>) {
   return function FramesLayer({ renderSlot }: {
     renderSlot(key: 'frames.body', owner: object, options: { entryKey: string }): unknown
   }) {
     const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot)
+    // The preview and the gesture live in this closure. Neither is in the model,
+    // so neither can reach a preset or become an undo step of its own.
+    const [preview, setPreview] = useState<NormalizedRect | undefined>(undefined)
+    const active = useRef<Active | undefined>(undefined)
+    const armed = useRef(false)
 
     useEffect(() => {
-      let armed = false
+      const onMove = (event: PointerEvent): void => {
+        const running = active.current
+        if (running === undefined) return
+        const point = at(event)
+        if (running.kind === 'float') {
+          const delta = { x: point.x - running.from.x, y: point.y - running.from.y }
+          setPreview(running.corner === undefined
+            ? draggedFloatRect(running.start, delta)
+            : resizedFloatRect(running.start, delta, running.corner))
+          return
+        }
+        if (running.kind === 'divider') return
+        const context = controller.context(running.seed)
+        const gesture = releaseGesture(running.session, point, context)
+        setPreview(gesture.kind === 'drop' ? dropPreview(gesture.target, context.panes) : undefined)
+      }
+
+      // The release is the only moment the tree hears about a drag.
+      const onUp = (event: PointerEvent): void => {
+        const running = active.current
+        active.current = undefined
+        setPreview(undefined)
+        if (running === undefined) return
+        const point = at(event)
+        if (running.kind === 'chip') {
+          controller.dispatch(releaseGesture(running.session, point, controller.context(running.seed)))
+          return
+        }
+        if (running.kind === 'divider') {
+          const extent = viewport()
+          const delta = dividerDelta(running.divider, {
+            x: event.clientX - running.from.x * extent.width,
+            y: event.clientY - running.from.y * extent.height,
+          }, extent)
+          controller.dispatch({
+            kind: 'resizeSplit',
+            splitId: running.divider.splitId,
+            sizes: dragSizes(running.divider, delta),
+          })
+          return
+        }
+        const delta = { x: point.x - running.from.x, y: point.y - running.from.y }
+        controller.dispatch({
+          kind: 'placeFloat',
+          paneId: running.paneId,
+          rect: running.corner === undefined
+            ? draggedFloatRect(running.start, delta)
+            : resizedFloatRect(running.start, delta, running.corner),
+        })
+      }
+
       const onKey = (event: KeyboardEvent): void => {
         const target = event.target as HTMLElement | null
-        if (target !== null && (target.tagName === 'INPUT' || target.isContentEditable)) return
+        // A frame must never take a key away from a text field: `M-h` there is
+        // the caret moving left, not the focus moving left.
+        if (target !== null && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+          return
+        }
         const key = event.key.toLowerCase()
-        const prefix = armed
-        armed = false
-
-        // `C-x` arms the default key map's prefix; the chord after it may carry a
-        // second modifier, so `C-x C-d` closes while `C-x d` docks.
-        if (event.ctrlKey && !event.altKey && key === 'x') {
-          armed = true
+        if (!armed.current && event.ctrlKey && !event.altKey && key === 'x') {
+          armed.current = true
           event.preventDefault()
           return
         }
-
-        const run = prefix
-          ? key === 'f' ? () => controller.float()
-            : key === 'd' && event.ctrlKey ? () => controller.close()
-              : key === 'd' ? () => controller.dock()
-                : key === 'right' ? () => controller.split()
-                  : undefined
-          : event.altKey
-            ? key === 'h' ? () => controller.focus('left')
-              : key === 'j' ? () => controller.focus('down')
-                : key === 'k' ? () => controller.focus('up')
-                  : key === 'l' ? () => controller.focus('right')
-                    : undefined
-            : undefined
-        if (run === undefined) return
+        const prefix = armed.current
+        armed.current = false
+        const chord = readChord(event, prefix)
+        if (chord === undefined) return
+        const gesture = chordGesture(chord, controller.context(controller.seed()))
+        if (gesture === undefined) return
         event.preventDefault()
-        run()
+        controller.dispatch(gesture)
       }
+
       const onResize = (): void => { controller.remeasure() }
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+      window.addEventListener('pointercancel', onUp)
       window.addEventListener('keydown', onKey)
       window.addEventListener('resize', onResize)
       return () => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        window.removeEventListener('pointercancel', onUp)
         window.removeEventListener('keydown', onKey)
         window.removeEventListener('resize', onResize)
       }
     }, [])
 
+    const begin = (next: Active): void => { active.current = next }
+    const stop = (event: { stopPropagation(): void }): void => { event.stopPropagation() }
+
     const { view } = snapshot
 
-    const frames = view.docked.map((pane) => createElement('div', {
-      key: pane.id,
-      onClick: () => controller.focusPane(pane.id),
-      style: {
-        position: 'absolute',
-        boxSizing: 'border-box',
-        left: `calc(${pane.rect.x * 100}% + 1px)`,
-        top: `calc(${pane.rect.y * 100}% + 1px)`,
-        width: `calc(${pane.rect.width * 100}% - 2px)`,
-        height: `calc(${pane.rect.height * 100}% - 2px)`,
-        pointerEvents: 'auto',
-        background: '#1b1f26',
-        border: pane.id === view.active ? '1px solid #6ea8fe' : '1px solid #39404c',
-        borderRadius: '6px',
-        // A frame adds no inset of its own: the body draws its own and reaches
-        // the frame's edges, so padding here would stop it filling the frame.
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-      },
-    },
-    // The frame's content is whatever its type's body supplies; a type with no
-    // registered body still shows its title, so an empty frame reads as one.
-    createElement('div', {
-      key: 'body',
-      // The body must be able to fill: a flex child with no basis keeps its
-      // content height, which is what left the conversation short of the frame.
-      style: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' },
-    },
-      pane.tabs[0] === undefined
-        ? '(empty frame)'
-        : renderSlot('frames.body', {}, { entryKey: pane.tabs[0].typeId }) ?? pane.tabs[0].title),
-    ))
+    const frames = view.docked.map((pane) => {
+      const shown = pane.tabs.find((tab) => tab.active) ?? pane.tabs[0]
+      // The strip is always drawn: it is the frame's grab handle, and with more
+      // than one chip it is also where a chip is picked up and put down.
+      const strip = createElement('div', {
+        key: 'strip',
+        onPointerDown: (event: { stopPropagation(): void }) => {
+          stop(event)
+          controller.dispatch({ kind: 'focusPane', paneId: pane.id })
+        },
+        style: {
+          display: 'flex',
+          flex: '0 0 auto',
+          height: '22px',
+          borderBottom: '1px solid #39404c',
+          background: '#171a20',
+          fontSize: '12px',
+          overflow: 'hidden',
+        },
+      }, pane.tabs.map((tab) => createElement('div', {
+        key: tab.id,
+        onPointerDown: (event: { stopPropagation(): void }) => {
+          stop(event)
+          controller.dispatch({ kind: 'focusPane', paneId: pane.id })
+          begin({
+            kind: 'chip',
+            session: { tabId: tab.id as TabId, fromPaneId: pane.id },
+            seed: tab.typeId,
+          })
+        },
+        style: {
+          flex: '0 1 auto',
+          maxWidth: '14em',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          padding: '3px 8px',
+          cursor: 'grab',
+          color: tab.active ? '#e6e9ef' : '#98a1b0',
+          background: tab.active ? '#2b3442' : 'transparent',
+          borderRight: '1px solid #39404c',
+        },
+      }, tab.title)))
 
-    const floats = view.floats.map((frame) => createElement('div', {
-      key: frame.id,
+      return createElement('div', {
+        key: pane.id,
+        // Focus follows a click anywhere in the frame, but the event is *not*
+        // stopped: the body is another plugin's content, and swallowing its
+        // pointer events would break every control inside it.
+        onPointerDown: () => { controller.dispatch({ kind: 'focusPane', paneId: pane.id }) },
+        style: {
+          ...area(pane.rect),
+          pointerEvents: 'auto',
+          background: '#1b1f26',
+          border: pane.id === view.active ? '1px solid #6ea8fe' : '1px solid #39404c',
+          borderRadius: '6px',
+          // A frame adds no inset of its own: the body draws its own and reaches
+          // the frame's edges, so padding here would stop it filling the frame.
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+        },
+      },
+      strip,
+      // The frame's content is whatever its type's body supplies; a type with no
+      // registered body still shows its title, so an empty frame reads as one.
+      createElement('div', {
+        key: 'body',
+        // The body must be able to fill: a flex child with no basis keeps its
+        // content height, which is what left the conversation short of the frame.
+        style: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' },
+      },
+      shown === undefined
+        ? '(empty frame)'
+        : renderSlot('frames.body', {}, { entryKey: shown.typeId }) ?? shown.title),
+      )
+    })
+
+    const dividers = view.dividers.map((divider) => createElement('div', {
+      key: `${divider.splitId}:${divider.index}`,
+      onPointerDown: (event: { preventDefault(): void; stopPropagation(): void; clientX: number; clientY: number }) => {
+        event.preventDefault()
+        stop(event)
+        begin({
+          kind: 'divider',
+          divider: {
+            splitId: divider.splitId,
+            axis: divider.axis,
+            index: divider.index,
+            sizes: divider.sizes,
+            parent: divider.parent,
+          },
+          from: at(event),
+        })
+      },
       style: {
         position: 'absolute',
         boxSizing: 'border-box',
-        ...(frame.rectHonoured
-          ? {
-            left: `calc(${frame.rect.x * 100}% + 1px)`,
-            top: `calc(${frame.rect.y * 100}% + 1px)`,
-            width: `calc(${frame.rect.width * 100}% - 2px)`,
-            height: `calc(${frame.rect.height * 100}% - 2px)`,
-          }
-          : { right: '1px', bottom: '1px', width: '40%', height: '50%' }),
+        left: divider.axis === 'row' ? `calc(${divider.at * 100}% - ${DIVIDER_GRAB / 2}px)` : '0',
+        top: divider.axis === 'row' ? '0' : `calc(${divider.at * 100}% - ${DIVIDER_GRAB / 2}px)`,
+        width: divider.axis === 'row' ? `${DIVIDER_GRAB}px` : '100%',
+        height: divider.axis === 'row' ? '100%' : `${DIVIDER_GRAB}px`,
+        cursor: divider.axis === 'row' ? 'col-resize' : 'row-resize',
         pointerEvents: 'auto',
-        background: '#202531',
-        border: '1px solid #5a6272',
-        borderRadius: '6px',
-        padding: '8px',
-        boxShadow: '0 8px 24px rgba(0,0,0,.45)',
-        overflow: 'hidden',
+        zIndex: 2,
       },
-    },
-    createElement('div', { key: 't', style: { fontWeight: 600 } }, frame.tabs[0]?.title ?? '(empty frame)'),
-    ))
+    }))
+
+    const floats = view.floats.map((frame) => {
+      const drawn = frame.rectHonoured
+        ? area(frame.rect)
+        : { position: 'absolute', boxSizing: 'border-box', right: '1px', bottom: '1px', width: '40%', height: '50%' }
+      const beginMove = (event: { stopPropagation(): void; clientX: number; clientY: number }): void => {
+        if (!frame.rectHonoured) return
+        stop(event)
+        begin({ kind: 'float', paneId: frame.id, corner: undefined, start: frame.rect, from: at(event) })
+      }
+      return createElement('div', {
+        key: frame.id,
+        style: {
+          ...drawn,
+          pointerEvents: 'auto',
+          background: '#202531',
+          border: '1px solid #5a6272',
+          borderRadius: '6px',
+          boxShadow: '0 8px 24px rgba(0,0,0,.45)',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+          zIndex: 3,
+        },
+      },
+      createElement('div', {
+        key: 'title',
+        onPointerDown: beginMove,
+        style: {
+          flex: '0 0 auto',
+          padding: '4px 8px',
+          fontWeight: 600,
+          background: '#171a20',
+          borderBottom: '1px solid #39404c',
+          cursor: frame.rectHonoured ? 'move' : 'default',
+        },
+      }, frame.tabs[0]?.title ?? '(empty frame)'),
+      createElement('div', { key: 'body', style: { flex: '1 1 auto', minHeight: 0, overflow: 'auto' } },
+        frame.tabs[0] === undefined
+          ? null
+          : renderSlot('frames.body', {}, { entryKey: frame.tabs[0].typeId }) ?? frame.tabs[0].title),
+      // The resize handle is the south-east corner, the one a window grows from.
+      frame.rectHonoured
+        ? createElement('div', {
+          key: 'grip',
+          onPointerDown: (event: { stopPropagation(): void; clientX: number; clientY: number }) => {
+            stop(event)
+            begin({ kind: 'float', paneId: frame.id, corner: 'se', start: frame.rect, from: at(event) })
+          },
+          style: {
+            position: 'absolute',
+            right: '0',
+            bottom: '0',
+            width: '14px',
+            height: '14px',
+            cursor: 'nwse-resize',
+            background: 'linear-gradient(135deg, transparent 50%, #5a6272 50%)',
+          },
+        })
+        : null,
+      )
+    })
 
     return createElement('div', {
       style: {
@@ -211,8 +457,19 @@ function createOverlay(controller: ReturnType<typeof createController>) {
         font: '13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace',
       },
     },
-    createElement('div', { key: 'area', style: { position: 'relative', width: '100%', height: '100%' } }, frames),
-    createElement('div', { key: 'floats', style: { position: 'relative', width: '100%', height: '100%' } }, floats),
+    createElement('div', { key: 'area', style: { position: 'relative', width: '100%', height: '100%' } }, frames, dividers),
+    createElement('div', { key: 'floats', style: { position: 'relative', width: '100%', height: '100%', pointerEvents: 'none' } }, floats),
+    preview === undefined ? null : createElement('div', {
+      key: 'preview',
+      style: {
+        ...area(preview),
+        pointerEvents: 'none',
+        background: 'rgba(110,168,254,.18)',
+        border: '1px solid #6ea8fe',
+        borderRadius: '6px',
+        zIndex: 50,
+      },
+    }),
     )
   }
 }
@@ -228,7 +485,11 @@ function createOverlay(controller: ReturnType<typeof createController>) {
 export function apply(ctx: {
   effect(callback: () => () => void, label: string): unknown
   reflect: { provide(name: string, value: unknown): () => void }
-  slots: { inject(key: string, callback: () => unknown): () => void; register(options: unknown, component: unknown): unknown }
+  slots: {
+    inject(key: string, callback: () => unknown): () => void
+    register(options: unknown, component: unknown): unknown
+    provideRoot(face: unknown): () => void
+  }
 }): void {
   ctx.effect(() => {
     const { service, dispose } = provideFramesService(ctx, { startup: CONVERSATION, platform: PLATFORM })
@@ -245,10 +506,10 @@ export function apply(ctx: {
         // family: a plugin supplies a body under that type's id.
         children: { 'frames.body': { kind: 'keyed', scope: 'root' } },
       },
-      createOverlay(controller),
+      createLayer(controller),
     )
     return () => {
-      dropLayer()
+      if (typeof dropLayer === 'function') dropLayer()
       dispose()
     }
   }, 'frames-web: service + layer registration')

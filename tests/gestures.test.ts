@@ -1,0 +1,267 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+
+import type { FramesService } from '../../frames/src/index.ts'
+import { ok } from '../../frames/src/index.ts'
+import {
+  caretIndex, chordGesture, dividerDelta, draggedFloatRect, dragSizes, dropPreview, dropTargetAt,
+  releaseGesture, resizedFloatRect,
+} from '../src/client/gestures.ts'
+import type { Chord, FrameGesture, GestureContext, GesturePane } from '../src/client/gestures.ts'
+import { execute } from '../src/client/execute.ts'
+
+/** Two panes side by side, as the projection would hand them over. */
+const PANES: readonly GesturePane[] = [
+  { id: 'pane-1' as GesturePane['id'], rect: { x: 0, y: 0, width: 0.5, height: 1 } },
+  { id: 'pane-2' as GesturePane['id'], rect: { x: 0.5, y: 0, width: 0.5, height: 1 } },
+]
+
+const CONTEXT: GestureContext = {
+  activePaneId: PANES[0]!.id,
+  activeTabId: 'tab-1' as GestureContext['activeTabId'],
+  seed: 'conversation',
+  panes: PANES,
+}
+
+/** A service that records the calls it receives and accepts every one of them. */
+function recorder(): { service: FramesService; calls: readonly unknown[][] } {
+  const calls: unknown[][] = []
+  const note = (name: string) => (...args: unknown[]) => {
+    calls.push([name, ...args])
+    return ok(undefined)
+  }
+  const service = {
+    registerType: note('registerType'),
+    attachRenderer: note('attachRenderer'),
+    reportMeasurements: note('reportMeasurements'),
+    project: () => { throw new Error('the gesture layer must not read the projection') },
+    subscribe: note('subscribe'),
+    split: note('split'),
+    close: note('close'),
+    float: note('float'),
+    dock: note('dock'),
+    focus: note('focus'),
+    moveFocus: note('moveFocus'),
+    open: note('open'),
+    drop: note('drop'),
+    placeTab: note('placeTab'),
+    resizeSplit: note('resizeSplit'),
+    placeFloat: note('placeFloat'),
+    activeTypeId: () => undefined,
+    isOpen: () => false,
+  } as unknown as FramesService
+  return { service, calls }
+}
+
+test('a release in the middle of a pane moves the frame in', () => {
+  const target = dropTargetAt(PANES, { x: 0.25, y: 0.5 })
+  assert.deepEqual(target, { kind: 'dock', paneId: 'pane-1', zone: 'center' })
+})
+
+test('a release near an edge names that edge, and the nearest one wins a corner', () => {
+  assert.equal(dropTargetAt(PANES, { x: 0.03, y: 0.5 })?.kind, 'dock')
+  assert.deepEqual(dropTargetAt(PANES, { x: 0.03, y: 0.5 }), { kind: 'dock', paneId: 'pane-1', zone: 'left' })
+  assert.deepEqual(dropTargetAt(PANES, { x: 0.47, y: 0.5 }), { kind: 'dock', paneId: 'pane-1', zone: 'right' })
+  assert.deepEqual(dropTargetAt(PANES, { x: 0.25, y: 0.02 }), { kind: 'dock', paneId: 'pane-1', zone: 'top' })
+  assert.deepEqual(dropTargetAt(PANES, { x: 0.25, y: 0.98 }), { kind: 'dock', paneId: 'pane-1', zone: 'bottom' })
+  // In the top-left corner the nearer edge is the top one, because y is smaller.
+  assert.deepEqual(dropTargetAt(PANES, { x: 0.02, y: 0.01 }), { kind: 'dock', paneId: 'pane-1', zone: 'top' })
+})
+
+test('a release over no pane at all has no target, which is what floating means', () => {
+  assert.equal(dropTargetAt(PANES, { x: 1.4, y: 0.5 }), undefined)
+  assert.equal(dropTargetAt([], { x: 0.5, y: 0.5 }), undefined)
+})
+
+test('a release is the only moment a drag becomes a gesture', () => {
+  const session = { tabId: 'tab-1' as never, fromPaneId: PANES[0]!.id }
+
+  assert.deepEqual(releaseGesture(session, { x: 0.25, y: 0.5 }, CONTEXT), {
+    kind: 'drop',
+    tabId: 'tab-1',
+    target: { kind: 'dock', paneId: 'pane-1', zone: 'center' },
+    seed: 'conversation',
+  })
+  assert.deepEqual(releaseGesture(session, { x: 3, y: 3 }, CONTEXT), {
+    kind: 'drop',
+    tabId: 'tab-1',
+    target: { kind: 'float' },
+    seed: 'conversation',
+  })
+})
+
+test('the preview draws the same area the release would fill', () => {
+  const target = dropTargetAt(PANES, { x: 0.03, y: 0.5 })
+  assert.deepEqual(dropPreview(target!, PANES), { x: 0, y: 0, width: 0.25, height: 1 })
+
+  const centre = dropTargetAt(PANES, { x: 0.25, y: 0.5 })
+  assert.deepEqual(dropPreview(centre!, PANES), PANES[0]!.rect)
+
+  // A release over nothing would make a window, which has no docked area to draw.
+  assert.equal(dropPreview({ kind: 'float' }, PANES), undefined)
+})
+
+test('every bound chord names an operation, and an unbound one names nothing', () => {
+  const bound: readonly Chord[] = [
+    'C-x down', 'C-x right', 'C-x f', 'C-x d', 'C-x C-d', 'M-h', 'M-j', 'M-k', 'M-l',
+  ]
+  for (const chord of bound) {
+    const gesture = chordGesture(chord, CONTEXT)
+    assert.notEqual(gesture, undefined, `${chord} should be bound`)
+  }
+  assert.equal(chordGesture('C-x C-d', CONTEXT)?.kind, 'close')
+  assert.equal(chordGesture('C-x f', CONTEXT)?.kind, 'float')
+  assert.equal(chordGesture('C-x d', CONTEXT)?.kind, 'dock')
+  // The two splits are the only ones the key map offers, and they differ by axis.
+  assert.deepEqual(chordGesture('C-x right', CONTEXT), {
+    kind: 'split', paneId: 'pane-1', axis: 'row', seed: 'conversation',
+  })
+  assert.deepEqual(chordGesture('C-x down', CONTEXT), {
+    kind: 'split', paneId: 'pane-1', axis: 'column', seed: 'conversation',
+  })
+})
+
+test('a chord with nothing focused refuses to name a target', () => {
+  const idle: GestureContext = { ...CONTEXT, activePaneId: undefined, activeTabId: undefined }
+
+  assert.equal(chordGesture('C-x right', idle), undefined)
+  assert.equal(chordGesture('C-x f', idle), undefined)
+  // Focus movement needs no target, so it still works with nothing focused.
+  assert.deepEqual(chordGesture('M-h', idle), { kind: 'focus', direction: 'left' })
+})
+
+test('a divider drag moves only the two children it separates', () => {
+  const divider = {
+    splitId: 'split-1' as never,
+    axis: 'row' as const,
+    index: 0,
+    sizes: [0.5, 0.3, 0.2],
+    parent: { x: 0, y: 0, width: 1, height: 1 },
+  }
+
+  const next = dragSizes(divider, 0.1)
+  assert.ok(Math.abs((next[0] ?? 0) - 0.6) < 1e-9)
+  assert.ok(Math.abs((next[1] ?? 0) - 0.2) < 1e-9)
+  assert.ok(Math.abs((next[2] ?? 0) - 0.2) < 1e-9, 'the third child does not move')
+  assert.ok(Math.abs(next.reduce((sum, size) => sum + size, 0) - 1) < 1e-9, 'the split keeps its total')
+})
+
+test('a divider drag is stopped by the pane floor', () => {
+  const divider = {
+    splitId: 'split-1' as never,
+    axis: 'row' as const,
+    index: 0,
+    sizes: [0.5, 0.5],
+    parent: { x: 0, y: 0, width: 1, height: 1 },
+  }
+  const next = dragSizes(divider, 0.49)
+
+  assert.ok((next[0] ?? 0) < 0.95, 'the drag cannot swallow the neighbour')
+  assert.ok((next[1] ?? 0) >= 0.12, 'the neighbour keeps the engine floor')
+})
+
+test('a divider drag never indexes past the children it has', () => {
+  const divider = {
+    splitId: 'split-1' as never,
+    axis: 'row' as const,
+    index: 3,
+    sizes: [0.5, 0.5],
+    parent: { x: 0, y: 0, width: 1, height: 1 },
+  }
+  assert.deepEqual(dragSizes(divider, 0.1), [0.5, 0.5])
+})
+
+test('pixel movement becomes a share of the split, not of the window', () => {
+  const divider = {
+    splitId: 'split-1' as never,
+    axis: 'row' as const,
+    index: 0,
+    sizes: [0.5, 0.5],
+    parent: { x: 0.5, y: 0, width: 0.5, height: 1 },
+  }
+  // 100px across a 1000px window is a tenth of the window, and a fifth of the
+  // half-width split it lands in.
+  assert.ok(Math.abs(dividerDelta(divider, { x: 100, y: 0 }, { width: 1000, height: 800 }) - 0.2) < 1e-9)
+  // A drag across a split that is not there cannot divide by it.
+  const flat = { ...divider, parent: { x: 0, y: 0, width: 0, height: 0 } }
+  assert.equal(dividerDelta(flat, { x: 100, y: 0 }, { width: 1000, height: 800 }), 0)
+})
+
+test('dragging a floating frame moves it and keeps it on screen', () => {
+  const start = { x: 0.2, y: 0.2, width: 0.4, height: 0.5 }
+
+  assert.deepEqual(draggedFloatRect(start, { x: 0.1, y: 0.1 }), { x: 0.30000000000000004, y: 0.30000000000000004, width: 0.4, height: 0.5 })
+  const pushed = draggedFloatRect(start, { x: 9, y: 9 })
+  assert.ok(pushed.x + pushed.width <= 1.0001)
+  assert.ok(pushed.y + pushed.height <= 1.0001)
+})
+
+test('resizing from a corner keeps the opposite corner where it was', () => {
+  const start = { x: 0.2, y: 0.2, width: 0.4, height: 0.4 }
+
+  const grown = resizedFloatRect(start, { x: 0.1, y: 0.1 }, 'se')
+  assert.deepEqual(grown, { x: 0.2, y: 0.2, width: 0.5, height: 0.5 })
+
+  // Growing from the north-west moves the origin and leaves the far corner.
+  const fromNorthWest = resizedFloatRect(start, { x: -0.1, y: -0.1 }, 'nw')
+  assert.ok(Math.abs(fromNorthWest.x - 0.1) < 1e-9)
+  assert.ok(Math.abs(fromNorthWest.x + fromNorthWest.width - 0.6) < 1e-9)
+})
+
+test('a resize cannot shrink a floating frame away, nor push it off screen', () => {
+  const start = { x: 0.5, y: 0.5, width: 0.4, height: 0.4 }
+
+  const tiny = resizedFloatRect(start, { x: -9, y: -9 }, 'se')
+  assert.ok(tiny.width >= 0.15 && tiny.height >= 0.15)
+  assert.ok(tiny.x >= 0 && tiny.y >= 0)
+
+  // Shrinking from the north-west past the far edge leaves the origin clamped.
+  const wide = resizedFloatRect(start, { x: 9, y: 9 }, 'nw')
+  assert.ok(wide.x >= 0 && wide.y >= 0)
+  assert.ok(wide.x + wide.width <= 1.0001)
+})
+
+test('a caret slot is where the pointer sits among the chips', () => {
+  assert.equal(caretIndex(0, 0.25, 3), 0)
+  assert.equal(caretIndex(0.6, 0.25, 3), 2)
+  // Dropping past the last chip lands at the end, and so does an impossible slot.
+  assert.equal(caretIndex(5, 0.25, 2), 2)
+  assert.equal(caretIndex(0.1, 0, 2), 2)
+})
+
+test('one gesture is one call on the frame service', () => {
+  const cases: readonly (readonly [FrameGesture, readonly unknown[]])[] = [
+    [{ kind: 'split', paneId: 'pane-1' as never, axis: 'row', seed: 'conversation' },
+      ['split', 'pane-1', 'conversation', 'row']],
+    [{ kind: 'drop', tabId: 'tab-1' as never, target: { kind: 'float' }, seed: 'conversation' },
+      ['drop', 'tab-1', { kind: 'float' }, 'conversation']],
+    [{ kind: 'placeTab', tabId: 'tab-1' as never, paneId: 'pane-1' as never, index: 2 },
+      ['placeTab', 'tab-1', 'pane-1', 2]],
+    [{ kind: 'close', paneId: 'pane-1' as never }, ['close', 'pane-1']],
+    [{ kind: 'float', paneId: 'pane-1' as never }, ['float', 'pane-1']],
+    [{ kind: 'dock', paneId: 'pane-1' as never }, ['dock', 'pane-1']],
+    [{ kind: 'focus', direction: 'up' }, ['moveFocus', 'up']],
+    [{ kind: 'focusPane', paneId: 'pane-2' as never }, ['focus', 'pane-2']],
+    [{ kind: 'resizeSplit', splitId: 'split-1' as never, sizes: [0.4, 0.6] },
+      ['resizeSplit', 'split-1', [0.4, 0.6]]],
+    [{ kind: 'placeFloat', paneId: 'pane-1' as never, rect: { x: 0, y: 0, width: 0.2, height: 0.2 } },
+      ['placeFloat', 'pane-1', { x: 0, y: 0, width: 0.2, height: 0.2 }]],
+  ]
+
+  for (const [gesture, expected] of cases) {
+    const { service, calls } = recorder()
+    assert.equal(execute(service, gesture), true)
+    assert.deepEqual(calls, [expected], `${gesture.kind} should make exactly one call`)
+  }
+})
+
+test('every gesture the layer can produce is one the service can carry out', () => {
+  const { service, calls } = recorder()
+  for (const chord of ['C-x down', 'C-x right', 'C-x f', 'C-x d', 'C-x C-d', 'M-h', 'M-j', 'M-k', 'M-l'] as const) {
+    execute(service, chordGesture(chord, CONTEXT)!)
+  }
+  execute(service, releaseGesture({ tabId: 'tab-1' as never, fromPaneId: PANES[0]!.id }, { x: 0.25, y: 0.5 }, CONTEXT))
+
+  // Nothing is left unhandled, and nothing is called twice.
+  assert.equal(calls.length, 10)
+})
