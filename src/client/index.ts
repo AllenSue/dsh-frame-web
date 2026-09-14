@@ -89,7 +89,9 @@ function createController(service: FramesService) {
  * @returns the frame layer.
  */
 function createOverlay(controller: ReturnType<typeof createController>) {
-  return function FramesLayer() {
+  return function FramesLayer({ renderSlot }: {
+    renderSlot(key: 'frames.body', owner: object, options: { entryKey: string }): unknown
+  }) {
     const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot)
 
     useEffect(() => {
@@ -156,7 +158,12 @@ function createOverlay(controller: ReturnType<typeof createController>) {
         overflow: 'hidden',
       },
     },
-    createElement('div', { key: 't', style: { fontWeight: 600 } }, pane.tabs[0]?.title ?? '(empty frame)'),
+    // The frame's content is whatever its type's body supplies; a type with no
+    // registered body still shows its title, so an empty frame reads as one.
+    createElement('div', { key: 'body', style: { marginTop: '4px' } },
+      pane.tabs[0] === undefined
+        ? '(empty frame)'
+        : renderSlot('frames.body', {}, { entryKey: pane.tabs[0].typeId }) ?? pane.tabs[0].title),
     ))
 
     const floats = view.floats.map((frame) => createElement('div', {
@@ -222,7 +229,15 @@ export function apply(ctx: {
     const { service, dispose } = provideFramesService(ctx, { startup: CONVERSATION, platform: PLATFORM })
     const controller = createController(service)
     const dropLayer = ctx.slots.inject('shell.overlay', () => ctx.slots.register(
-      { name: 'shell.overlay', id: 'frames-layer', order: 100, label: 'Frames' },
+      {
+        name: 'shell.overlay',
+        id: 'frames-layer',
+        order: 100,
+        label: 'Frames',
+        // Declaring the keyed body slot is what makes a frame type a content
+        // family: a plugin supplies a body under that type's id.
+        children: { 'frames.body': { kind: 'keyed', scope: 'root' } },
+      },
       createOverlay(controller),
     ))
     return () => {
