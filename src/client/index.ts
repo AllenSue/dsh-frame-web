@@ -12,8 +12,8 @@
  */
 import { createElement, useEffect, useSyncExternalStore } from 'react'
 import {
-  REACT_CAPABILITIES, closeFrame, createFrameState, moveFocus, project, redo, splitFrame,
-  undo, withMeasurements, withPlatform,
+  REACT_CAPABILITIES, closeFrame, createFrameState, focusFrame, moveFocus, project, splitFrame,
+  withMeasurements, withPlatform,
 } from '../../../frames/src/index.ts'
 import type { FrameState, FrameTypeDefinition } from '../../../frames/src/index.ts'
 
@@ -88,8 +88,6 @@ function createController() {
     },
     split(): void { this.run(splitFrame(state, undefined, CONVERSATION.id)) },
     close(): void { this.run(closeFrame(state)) },
-    undo(): void { this.run(undo(state)) },
-    redo(): void { this.run(redo(state)) },
     focus(direction: 'left' | 'right' | 'up' | 'down'): void { this.run(moveFocus(state, direction)) },
     focusPane(paneId: string): void { this.run(focusFrame(state, paneId as never)) },
   }
@@ -120,8 +118,7 @@ function createOverlay(controller: ReturnType<typeof createController>) {
               : chord === 'm-l' ? () => controller.focus('right')
                 : chord === 'c-f' ? () => controller.split()
                   : chord === 'c-d' ? () => controller.close()
-                    : chord === 'c-u' ? () => controller.undo()
-                      : undefined
+                    : undefined
         if (action === undefined) return
         event.preventDefault()
         action()
