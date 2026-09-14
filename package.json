@@ -1,0 +1,22 @@
+{
+  "name": "@deepseek-ai/dsh-client-frames-web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Frame manager web renderer: draws the core's projection into the shell overlay",
+  "type": "module",
+  "exports": {
+    ".": "./lib/client.js",
+    "./client": "./lib/client.js"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build": "node ../../../tools/build-client.ts"
+  }
+}
