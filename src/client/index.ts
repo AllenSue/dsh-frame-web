@@ -26,8 +26,6 @@ const CONVERSATION: FrameTypeDefinition = { id: 'conversation', title: () => 'Co
 interface Snapshot {
   readonly visible: boolean
   readonly view: ReturnType<typeof project>
-  readonly intents: number
-  readonly note: string
 }
 
 /**
@@ -41,12 +39,11 @@ function createController() {
     { viewport: { width: window.innerWidth, height: window.innerHeight } },
   )
   let visible = true
-  let note = ''
-  let snapshot: Snapshot = { visible, view: project(state), intents: 0, note }
+  let snapshot: Snapshot = { visible, view: project(state) }
 
   const listeners = new Set<() => void>()
   const publish = (): void => {
-    snapshot = { visible, view: project(state), intents: state.history.past.length, note }
+    snapshot = { visible, view: project(state) }
     for (const listener of listeners) listener()
   }
 
@@ -56,14 +53,14 @@ function createController() {
       return () => { listeners.delete(listener) }
     },
     getSnapshot: (): Snapshot => snapshot,
-    /** Adopt an accepted intent; a refusal is shown instead of thrown. */
+    /** Adopt an accepted intent; a refusal changes nothing and is reported. */
     run(result: ReturnType<typeof splitFrame>): void {
-      if (result.ok) {
-        note = ''
-        state = result.value
-      } else {
-        note = result.code
+      if (!result.ok) {
+        // The overlay has no chrome to report in, so the console is the feedback.
+        console.warn(`[frames] ${result.code}: ${result.message}`)
+        return
       }
+      state = result.value
       publish()
     },
     toggle(): void {
@@ -94,28 +91,17 @@ function createController() {
     undo(): void { this.run(undo(state)) },
     redo(): void { this.run(redo(state)) },
     focus(direction: 'left' | 'right' | 'up' | 'down'): void { this.run(moveFocus(state, direction)) },
+    focusPane(paneId: string): void { this.run(focusFrame(state, paneId as never)) },
   }
 }
 
-/** A button styled to read on both themes without a stylesheet. */
-function button(label: string, onClick: () => void, active = false) {
-  return createElement('button', {
-    key: label,
-    onClick,
-    style: {
-      font: 'inherit',
-      padding: '3px 9px',
-      borderRadius: '6px',
-      border: '1px solid #39404c',
-      background: active ? '#2f6f4f' : '#1d2129',
-      color: 'inherit',
-      cursor: 'pointer',
-    },
-  }, label)
-}
+/**
+ * The overlay entry: the frame layer alone, with no chrome of its own.
+ * @returns the overlay, or nothing while hidden.
+ */
 
 /**
- * The overlay entry: a full-viewport frame layer with its own control bar.
+ * The overlay entry: the frame layer alone, with no chrome of its own.
  * @returns the overlay, or nothing while hidden.
  */
 function createOverlay(controller: ReturnType<typeof createController>) {
@@ -152,29 +138,10 @@ function createOverlay(controller: ReturnType<typeof createController>) {
     if (!snapshot.visible) return null
 
     const { view } = snapshot
-    const children = [
-      createElement('div', {
-        key: 'bar',
-        style: { display: 'flex', gap: '6px', alignItems: 'center', padding: '6px 10px', borderBottom: '1px solid #2a2f38' },
-      },
-      createElement('strong', { key: 'title', style: { marginRight: '8px' } }, 'frames'),
-      button('Split', () => controller.split()),
-      button('Close', () => controller.close()),
-      button('Undo', () => controller.undo()),
-      button('Redo', () => controller.redo()),
-      button('terminal', () => controller.setPlatform('tui')),
-      button('browser', () => controller.setPlatform('react')),
-      button('Reset', () => controller.reset()),
-      button('Hide (C-x)', () => controller.toggle()),
-      createElement('span', { key: 'status', style: { color: '#8b93a3', marginLeft: 'auto' } },
-        `${view.platform} · panes ${view.docked.length} · intents ${snapshot.intents}`
-        + (snapshot.note === '' ? '' : ` · refused ${snapshot.note}`)),
-      ),
-    ]
 
     const panes = view.docked.map((pane) => createElement('div', {
       key: pane.id,
-      onClick: () => controller.run(moveFocus ? controller.focus('right') : controller.focus('right')),
+      onClick: () => controller.focusPane(pane.id),
       style: {
         position: 'absolute',
         boxSizing: 'border-box',
@@ -207,7 +174,6 @@ function createOverlay(controller: ReturnType<typeof createController>) {
         flexDirection: 'column',
       },
     },
-    createElement('div', { key: 'barwrap' }, children),
     createElement('div', { key: 'area', style: { position: 'relative', flex: '1', margin: '10px' } }, panes),
     )
   }
