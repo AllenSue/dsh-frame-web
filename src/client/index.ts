@@ -16,10 +16,9 @@
  */
 import { createElement, useEffect, useSyncExternalStore } from 'react'
 import {
-  REACT_CAPABILITIES, closeFrame, createFrameState, dockFrame, floatFrame, focusFrame, moveFocus,
-  project, splitFrame, withMeasurements,
+  REACT_CAPABILITIES, provideFramesService, project,
 } from '../../../frames/src/index.ts'
-import type { FrameState, FrameTypeDefinition } from '../../../frames/src/index.ts'
+import type { FramesService, FrameTypeDefinition } from '../../../frames/src/index.ts'
 
 /** Services this plugin needs before it activates. */
 export const inject = ['slots']
@@ -29,31 +28,42 @@ const CONVERSATION: FrameTypeDefinition = { id: 'conversation', title: () => 'Co
 /** Which way a split runs. */
 type SplitAxis = 'row' | 'column'
 
-/** The core state plus what the layer needs to draw it. */
+/** The projection the layer draws. */
 interface Snapshot {
   readonly view: ReturnType<typeof project>
 }
 
-/**
- * One layer's state. Kept outside React so a resize or a key press can publish
- * without a component owning the layout.
- */
-function createController() {
-  const platform = { id: 'react', capabilities: REACT_CAPABILITIES }
-  const measured = (): FrameState => withMeasurements(
-    state,
-    { viewport: { width: window.innerWidth, height: window.innerHeight } },
-  )
-  let state: FrameState = withMeasurements(
-    createFrameState({ startup: CONVERSATION, platform }),
-    { viewport: { width: window.innerWidth, height: window.innerHeight } },
-  )
-  let snapshot: Snapshot = { view: project(state) }
+/** The renderer's declaration: pixels, pointer drag, real floating panels. */
+const PLATFORM = { id: 'react', capabilities: REACT_CAPABILITIES }
 
+/** The drawable extent, which this renderer owns and reports. */
+const viewport = (): { width: number; height: number } => ({
+  width: window.innerWidth,
+  height: window.innerHeight,
+})
+
+/**
+ * The layer's view of the shared tree.
+ *
+ * It holds no layout of its own: it subscribes to `ctx.frames` and reports what
+ * it measured, so the compatibility layer and any other renderer drive the same
+ * tree through the same service.
+ * @param service - the frame tree published by this plugin.
+ * @returns the readable snapshot plus the intents this layer can send.
+ */
+function createController(service: FramesService) {
+  let snapshot: Snapshot = { view: service.project() }
   const listeners = new Set<() => void>()
-  const publish = (): void => {
-    snapshot = { view: project(state) }
+
+  service.subscribe(() => {
+    snapshot = { view: service.project() }
     for (const listener of listeners) listener()
+  })
+  service.reportMeasurements({ viewport: viewport() })
+
+  /** Send an intent; the layer draws no chrome, so a refusal lands in the console. */
+  const send = (result: { ok: boolean; code?: string; message?: string }): void => {
+    if (!result.ok) console.warn(`[frames] ${result.code}: ${result.message}`)
   }
 
   return {
@@ -62,26 +72,15 @@ function createController() {
       return () => { listeners.delete(listener) }
     },
     getSnapshot: (): Snapshot => snapshot,
-    /** Adopt an accepted intent; a refusal changes nothing and is reported. */
-    run(result: ReturnType<typeof splitFrame>): void {
-      if (!result.ok) {
-        // The layer draws no chrome, so the console is where a refusal lands.
-        console.warn(`[frames] ${result.code}: ${result.message}`)
-        return
-      }
-      state = result.value
-      publish()
-    },
     remeasure(): void {
-      state = measured()
-      publish()
+      service.reportMeasurements({ viewport: viewport() })
     },
-    split(): void { this.run(splitFrame(state, undefined, CONVERSATION.id)) },
-    close(): void { this.run(closeFrame(state)) },
-    float(): void { this.run(floatFrame(state)) },
-    dock(): void { this.run(dockFrame(state)) },
-    focus(direction: 'left' | 'right' | 'up' | 'down'): void { this.run(moveFocus(state, direction)) },
-    focusPane(paneId: string): void { this.run(focusFrame(state, paneId as never)) },
+    split(): void { send(service.split(undefined, CONVERSATION.id)) },
+    close(): void { send(service.close()) },
+    float(): void { send(service.float()) },
+    dock(): void { send(service.dock()) },
+    focus(direction: 'left' | 'right' | 'up' | 'down'): void { send(service.moveFocus(direction)) },
+    focusPane(paneId: string): void { send(service.focus(paneId as never)) },
   }
 }
 
@@ -207,13 +206,28 @@ function createOverlay(controller: ReturnType<typeof createController>) {
 }
 
 /**
- * Register the layer entry.
+ * Mount the frame tree and register the layer that draws it.
+ *
+ * The service is mounted here rather than by a plugin of its own because this is
+ * the web client's renderer: a terminal mounts the same service in its own
+ * composition, which is what keeps the core out of any one host.
  * @param ctx - the client context.
  */
-export function apply(ctx: { slots: { inject(key: string, callback: () => unknown): unknown; register(options: unknown, component: unknown): unknown } }): void {
-  const controller = createController()
-  ctx.slots.inject('shell.overlay', () => ctx.slots.register(
-    { name: 'shell.overlay', id: 'frames-layer', order: 100, label: 'Frames' },
-    createOverlay(controller),
-  ))
+export function apply(ctx: {
+  effect(callback: () => () => void, label: string): unknown
+  reflect: { provide(name: string, value: unknown): () => void }
+  slots: { inject(key: string, callback: () => unknown): () => void; register(options: unknown, component: unknown): unknown }
+}): void {
+  ctx.effect(() => {
+    const { service, dispose } = provideFramesService(ctx, { startup: CONVERSATION, platform: PLATFORM })
+    const controller = createController(service)
+    const dropLayer = ctx.slots.inject('shell.overlay', () => ctx.slots.register(
+      { name: 'shell.overlay', id: 'frames-layer', order: 100, label: 'Frames' },
+      createOverlay(controller),
+    ))
+    return () => {
+      dropLayer()
+      dispose()
+    }
+  }, 'frames-web: service + layer registration')
 }
