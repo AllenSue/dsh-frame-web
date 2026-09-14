@@ -23,7 +23,8 @@ import type { FramesService, FrameTypeDefinition } from '../../../frames/src/ind
 /** Services this plugin needs before it activates. */
 export const inject = ['slots']
 
-const CONVERSATION: FrameTypeDefinition = { id: 'conversation', title: () => 'Conversation' }
+/** The type the shell opens with. The compatibility layer supplies its body. */
+const CONVERSATION: FrameTypeDefinition = { id: 'legacy.conversation', title: () => 'Conversation' }
 
 /** Which way a split runs. */
 type SplitAxis = 'row' | 'column'
@@ -194,14 +195,11 @@ function createOverlay(controller: ReturnType<typeof createController>) {
     return createElement('div', {
       style: {
         position: 'fixed',
-        // A bounded region over the shell's centre column. It covers nothing the
-        // user needs: the sidebar and header stay visible and usable.
-        top: '56px',
-        left: '272px',
-        right: '12px',
-        bottom: '12px',
+        // This is the window now: it fills the viewport and draws every frame.
+        inset: '0',
         zIndex: 40,
-        pointerEvents: 'none',
+        pointerEvents: 'auto',
+        background: '#14161a',
         color: '#d8dbe2',
         font: '13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace',
       },
@@ -228,9 +226,11 @@ export function apply(ctx: {
   ctx.effect(() => {
     const { service, dispose } = provideFramesService(ctx, { startup: CONVERSATION, platform: PLATFORM })
     const controller = createController(service)
-    const dropLayer = ctx.slots.inject('shell.overlay', () => ctx.slots.register(
+    const dropLayer = ctx.slots.register(
       {
-        name: 'shell.overlay',
+        // `root` is the runtime's built-in slot, so this takes the window rather
+        // than contributing to someone else's seat.
+        name: 'root',
         id: 'frames-layer',
         order: 100,
         label: 'Frames',
@@ -239,7 +239,7 @@ export function apply(ctx: {
         children: { 'frames.body': { kind: 'keyed', scope: 'root' } },
       },
       createOverlay(controller),
-    ))
+    )
     return () => {
       dropLayer()
       dispose()
