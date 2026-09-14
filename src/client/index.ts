@@ -3,8 +3,12 @@
  *
  * It registers one entry into the shell's `shell.overlay` slot and draws the
  * core's projection there. `ui-layout` owns that slot, so this plugin only works
- * while that plugin is mounted — which is exactly the arrangement the design
- * chose for the first step: the new shell is drawn over the existing one.
+ * while that plugin is mounted — which is the arrangement the design chose for
+ * the first step, before the frame tree replaces the shell outright.
+ *
+ * The layer occupies a bounded region and covers nothing: the shell's own chrome
+ * stays visible and usable, and the pointer passes through everywhere except the
+ * frames themselves.
  *
  * The build concatenates this file after the core's modules, so the relative
  * import below is erased and these names come from that shared scope. Only `react`
@@ -12,8 +16,8 @@
  */
 import { createElement, useEffect, useSyncExternalStore } from 'react'
 import {
-  REACT_CAPABILITIES, closeFrame, createFrameState, focusFrame, moveFocus, project, splitFrame,
-  withMeasurements, withPlatform,
+  REACT_CAPABILITIES, closeFrame, createFrameState, dockFrame, floatFrame, focusFrame, moveFocus,
+  project, splitFrame, withMeasurements,
 } from '../../../frames/src/index.ts'
 import type { FrameState, FrameTypeDefinition } from '../../../frames/src/index.ts'
 
@@ -22,28 +26,33 @@ export const inject = ['slots']
 
 const CONVERSATION: FrameTypeDefinition = { id: 'conversation', title: () => 'Conversation' }
 
-/** The core state plus what the overlay needs to draw it. */
+/** Which way a split runs. */
+type SplitAxis = 'row' | 'column'
+
+/** The core state plus what the layer needs to draw it. */
 interface Snapshot {
-  readonly visible: boolean
   readonly view: ReturnType<typeof project>
 }
 
 /**
- * One overlay's state. Kept outside React so a resize or a key press can publish
+ * One layer's state. Kept outside React so a resize or a key press can publish
  * without a component owning the layout.
  */
 function createController() {
-  let platform = { id: 'react', capabilities: REACT_CAPABILITIES }
+  const platform = { id: 'react', capabilities: REACT_CAPABILITIES }
+  const measured = (): FrameState => withMeasurements(
+    state,
+    { viewport: { width: window.innerWidth, height: window.innerHeight } },
+  )
   let state: FrameState = withMeasurements(
     createFrameState({ startup: CONVERSATION, platform }),
     { viewport: { width: window.innerWidth, height: window.innerHeight } },
   )
-  let visible = true
-  let snapshot: Snapshot = { visible, view: project(state) }
+  let snapshot: Snapshot = { view: project(state) }
 
   const listeners = new Set<() => void>()
   const publish = (): void => {
-    snapshot = { visible, view: project(state) }
+    snapshot = { view: project(state) }
     for (const listener of listeners) listener()
   }
 
@@ -56,72 +65,67 @@ function createController() {
     /** Adopt an accepted intent; a refusal changes nothing and is reported. */
     run(result: ReturnType<typeof splitFrame>): void {
       if (!result.ok) {
-        // The overlay has no chrome to report in, so the console is the feedback.
+        // The layer draws no chrome, so the console is where a refusal lands.
         console.warn(`[frames] ${result.code}: ${result.message}`)
         return
       }
       state = result.value
       publish()
     },
-    toggle(): void {
-      visible = !visible
-      publish()
-    },
     remeasure(): void {
-      state = withMeasurements(state, { viewport: { width: window.innerWidth, height: window.innerHeight } })
-      publish()
-    },
-    reset(): void {
-      state = withMeasurements(
-        createFrameState({ startup: CONVERSATION, platform }),
-        { viewport: { width: window.innerWidth, height: window.innerHeight } },
-      )
-      note = ''
-      publish()
-    },
-    setPlatform(id: string): void {
-      platform = id === 'tui'
-        ? { id: 'tui', capabilities: { ...REACT_CAPABILITIES, floats: 'overlay', freeRect: false, drag: false } }
-        : { id: 'react', capabilities: REACT_CAPABILITIES }
-      state = withPlatform(state, platform)
+      state = measured()
       publish()
     },
     split(): void { this.run(splitFrame(state, undefined, CONVERSATION.id)) },
     close(): void { this.run(closeFrame(state)) },
+    float(): void { this.run(floatFrame(state)) },
+    dock(): void { this.run(dockFrame(state)) },
     focus(direction: 'left' | 'right' | 'up' | 'down'): void { this.run(moveFocus(state, direction)) },
     focusPane(paneId: string): void { this.run(focusFrame(state, paneId as never)) },
   }
 }
 
 /**
- * The overlay entry: the frame layer alone, with no chrome of its own.
- * @returns the overlay, or nothing while hidden.
- */
-
-/**
- * The overlay entry: the frame layer alone, with no chrome of its own.
- * @returns the overlay, or nothing while hidden.
+ * The layer entry: the frame tree alone, with no chrome of its own.
+ * @returns the frame layer.
  */
 function createOverlay(controller: ReturnType<typeof createController>) {
-  return function FramesOverlay() {
+  return function FramesLayer() {
     const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot)
 
     useEffect(() => {
+      let armed = false
       const onKey = (event: KeyboardEvent): void => {
         const target = event.target as HTMLElement | null
         if (target !== null && (target.tagName === 'INPUT' || target.isContentEditable)) return
-        const chord = `${event.ctrlKey ? 'C-' : ''}${event.altKey ? 'M-' : ''}${event.key.toLowerCase()}`
-        if (chord === 'c-x') { event.preventDefault(); controller.toggle(); return }
-        const action = chord === 'm-h' ? () => controller.focus('left')
-          : chord === 'm-j' ? () => controller.focus('down')
-            : chord === 'm-k' ? () => controller.focus('up')
-              : chord === 'm-l' ? () => controller.focus('right')
-                : chord === 'c-f' ? () => controller.split()
-                  : chord === 'c-d' ? () => controller.close()
+        const key = event.key.toLowerCase()
+        const prefix = armed
+        armed = false
+
+        // `C-x` arms the default key map's prefix; the chord after it may carry a
+        // second modifier, so `C-x C-d` closes while `C-x d` docks.
+        if (event.ctrlKey && !event.altKey && key === 'x') {
+          armed = true
+          event.preventDefault()
+          return
+        }
+
+        const run = prefix
+          ? key === 'f' ? () => controller.float()
+            : key === 'd' && event.ctrlKey ? () => controller.close()
+              : key === 'd' ? () => controller.dock()
+                : key === 'right' ? () => controller.split()
+                  : undefined
+          : event.altKey
+            ? key === 'h' ? () => controller.focus('left')
+              : key === 'j' ? () => controller.focus('down')
+                : key === 'k' ? () => controller.focus('up')
+                  : key === 'l' ? () => controller.focus('right')
                     : undefined
-        if (action === undefined) return
+            : undefined
+        if (run === undefined) return
         event.preventDefault()
-        action()
+        run()
       }
       const onResize = (): void => { controller.remeasure() }
       window.addEventListener('keydown', onKey)
@@ -132,11 +136,9 @@ function createOverlay(controller: ReturnType<typeof createController>) {
       }
     }, [])
 
-    if (!snapshot.visible) return null
-
     const { view } = snapshot
 
-    const panes = view.docked.map((pane) => createElement('div', {
+    const frames = view.docked.map((pane) => createElement('div', {
       key: pane.id,
       onClick: () => controller.focusPane(pane.id),
       style: {
@@ -146,6 +148,8 @@ function createOverlay(controller: ReturnType<typeof createController>) {
         top: `calc(${pane.rect.y * 100}% + 1px)`,
         width: `calc(${pane.rect.width * 100}% - 2px)`,
         height: `calc(${pane.rect.height * 100}% - 2px)`,
+        // Only the frames take the pointer; everything between them passes through.
+        pointerEvents: 'auto',
         background: '#1b1f26',
         border: pane.id === view.active ? '1px solid #6ea8fe' : '1px solid #39404c',
         borderRadius: '6px',
@@ -153,37 +157,63 @@ function createOverlay(controller: ReturnType<typeof createController>) {
         overflow: 'hidden',
       },
     },
-    createElement('div', { key: 't', style: { fontWeight: 600 } }, pane.tabs[0]?.title ?? '(empty pane)'),
-    createElement('div', { key: 'm', style: { color: '#8b93a3', marginTop: '4px' } },
-      `x ${pane.rect.x.toFixed(2)} · w ${pane.rect.width.toFixed(2)}`),
+    createElement('div', { key: 't', style: { fontWeight: 600 } }, pane.tabs[0]?.title ?? '(empty frame)'),
+    ))
+
+    const floats = view.floats.map((frame) => createElement('div', {
+      key: frame.id,
+      style: {
+        position: 'absolute',
+        boxSizing: 'border-box',
+        ...(frame.rectHonoured
+          ? {
+            left: `calc(${frame.rect.x * 100}% + 1px)`,
+            top: `calc(${frame.rect.y * 100}% + 1px)`,
+            width: `calc(${frame.rect.width * 100}% - 2px)`,
+            height: `calc(${frame.rect.height * 100}% - 2px)`,
+          }
+          : { right: '1px', bottom: '1px', width: '40%', height: '50%' }),
+        pointerEvents: 'auto',
+        background: '#202531',
+        border: '1px solid #5a6272',
+        borderRadius: '6px',
+        padding: '8px',
+        boxShadow: '0 8px 24px rgba(0,0,0,.45)',
+        overflow: 'hidden',
+      },
+    },
+    createElement('div', { key: 't', style: { fontWeight: 600 } }, frame.tabs[0]?.title ?? '(empty frame)'),
     ))
 
     return createElement('div', {
       style: {
         position: 'fixed',
-        inset: '0',
+        // A bounded region over the shell's centre column. It covers nothing the
+        // user needs: the sidebar and header stay visible and usable.
+        top: '56px',
+        left: '272px',
+        right: '12px',
+        bottom: '12px',
         zIndex: 40,
-        pointerEvents: 'auto',
-        background: '#14161a',
+        pointerEvents: 'none',
         color: '#d8dbe2',
         font: '13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace',
-        display: 'flex',
-        flexDirection: 'column',
       },
     },
-    createElement('div', { key: 'area', style: { position: 'relative', flex: '1', margin: '10px' } }, panes),
+    createElement('div', { key: 'area', style: { position: 'relative', width: '100%', height: '100%' } }, frames),
+    createElement('div', { key: 'floats', style: { position: 'relative', width: '100%', height: '100%' } }, floats),
     )
   }
 }
 
 /**
- * Register the overlay entry.
+ * Register the layer entry.
  * @param ctx - the client context.
  */
 export function apply(ctx: { slots: { inject(key: string, callback: () => unknown): unknown; register(options: unknown, component: unknown): unknown } }): void {
   const controller = createController()
   ctx.slots.inject('shell.overlay', () => ctx.slots.register(
-    { name: 'shell.overlay', id: 'frames-overlay', order: 100, label: 'Frames' },
+    { name: 'shell.overlay', id: 'frames-layer', order: 100, label: 'Frames' },
     createOverlay(controller),
   ))
 }
