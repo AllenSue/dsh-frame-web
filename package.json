@@ -4,8 +4,9 @@
   "private": true,
   "description": "Frame manager web renderer: draws the core's projection into the shell overlay",
   "type": "module",
+  "main": "lib/index.js",
   "exports": {
-    ".": "./lib/client.js",
+    ".": "./lib/index.js",
     "./client": "./lib/client.js"
   },
   "dsh": {
