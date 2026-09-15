@@ -24,7 +24,9 @@ import {
   chordGesture, dividerDelta, draggedFloatRect, dragSizes, dropPreview, releaseGesture,
   resizedFloatRect,
 } from './gestures.ts'
-import type { Chord, DragSession, FrameGesture, GestureContext, GestureDivider, Point } from './gestures.ts'
+import type { DragSession, FrameGesture, GestureContext, GestureDivider, Point } from './gestures.ts'
+import { decideKey, hasSelection, isEditing } from './keys.ts'
+import type { TypingTarget } from './keys.ts'
 import { execute } from './execute.ts'
 
 /** Services this plugin needs before it activates. */
@@ -77,37 +79,6 @@ function area(rect: NormalizedRect): Record<string, string> {
     top: `calc(${rect.y * 100}% + 1px)`,
     width: `calc(${rect.width * 100}% - 2px)`,
     height: `calc(${rect.height * 100}% - 2px)`,
-  }
-}
-
-/**
- * Read a key event as a chord, or `undefined` when it is not one.
- *
- * `C-x` arms the default map's prefix, and the chord after it may carry a second
- * modifier, so `C-x C-d` closes while `C-x d` docks. Only two splits are bound:
- * up and left are the pointer's job, because a drag names the side by landing on
- * it and no chord has to encode that.
- * @param event - the key event.
- * @param prefix - whether `C-x` was pressed just before.
- * @returns the chord, in the design's notation.
- */
-export function readChord(event: KeyboardEvent, prefix: boolean): Chord | undefined {
-  const key = event.key.toLowerCase()
-  if (prefix) {
-    if (key === 'f') return 'C-x f'
-    if (key === 'd') return event.ctrlKey ? 'C-x C-d' : 'C-x d'
-    // The arrow keys keep their `Arrow` name; the design writes them short.
-    if (key === 'arrowright' || key === 'right') return 'C-x right'
-    if (key === 'arrowdown' || key === 'down') return 'C-x down'
-    return undefined
-  }
-  if (!event.altKey) return undefined
-  switch (key) {
-    case 'h': return 'M-h'
-    case 'j': return 'M-j'
-    case 'k': return 'M-k'
-    case 'l': return 'M-l'
-    default: return undefined
   }
 }
 
@@ -233,23 +204,27 @@ function createLayer(controller: ReturnType<typeof createController>) {
       }
 
       const onKey = (event: KeyboardEvent): void => {
-        const target = event.target as HTMLElement | null
-        // A frame must never take a key away from a text field: `M-h` there is
-        // the caret moving left, not the focus moving left.
-        if (target !== null && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
-          return
-        }
-        const key = event.key.toLowerCase()
-        if (!armed.current && event.ctrlKey && !event.altKey && key === 'x') {
+        // A frame takes its chords wherever the user is, a text field included:
+        // the whole point is to split or float without reaching for the mouse.
+        // The one thing a field keeps is a key already working there, which
+        // `decideKey` settles — `C-x` with a selection is still cut.
+        const target = event.target as (HTMLElement & TypingTarget) | null
+        const editing = isEditing(target)
+        const decision = decideKey(event, {
+          prefix: armed.current,
+          editing,
+          selected: editing && target !== null
+            && hasSelection(target, window.getSelection()?.isCollapsed ?? true),
+        })
+        armed.current = false
+
+        if (decision.kind === 'ignore') return
+        if (decision.kind === 'arm') {
           armed.current = true
           event.preventDefault()
           return
         }
-        const prefix = armed.current
-        armed.current = false
-        const chord = readChord(event, prefix)
-        if (chord === undefined) return
-        const gesture = chordGesture(chord, controller.context(controller.seed()))
+        const gesture = chordGesture(decision.chord, controller.context(controller.seed()))
         if (gesture === undefined) return
         event.preventDefault()
         controller.dispatch(gesture)

@@ -18,6 +18,11 @@ import type {
 import {
   clampFloatRect, clampSizes, DOCK_EDGE_FRACTION, zoneAt,
 } from '../../../frames/src/index.ts'
+import type { Chord } from './keys.ts'
+
+// The chord vocabulary belongs to the key layer; re-exported here because a
+// chord and the gesture it names are read together by whoever wires the key map.
+export type { Chord } from './keys.ts'
 
 /** A point in fractions of the drawable area. */
 export interface Point {
@@ -79,13 +84,6 @@ export type FrameGesture =
   | { readonly kind: 'focusPane'; readonly paneId: PaneId }
   | { readonly kind: 'resizeSplit'; readonly splitId: SplitId; readonly sizes: readonly number[] }
   | { readonly kind: 'placeFloat'; readonly paneId: PaneId; readonly rect: NormalizedRect }
-
-/** A chord in the default key map, written the way the design writes it. */
-export type Chord =
-  | 'C-x down' | 'C-x right'
-  | 'C-x f' | 'C-x d'
-  | 'C-x C-d'
-  | 'M-h' | 'M-j' | 'M-k' | 'M-l'
 
 /**
  * The gesture a chord asks for, or none when the chord is not bound.
