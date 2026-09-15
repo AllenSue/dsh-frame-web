@@ -5,7 +5,7 @@ import type { FramesService } from '../../frames/src/index.ts'
 import { ok } from '../../frames/src/index.ts'
 import {
   caretIndex, chordGesture, dividerDelta, draggedFloatRect, dragSizes, dropPreview, dropTargetAt,
-  releaseGesture, resizedFloatRect,
+  nextPreset, releaseGesture, resizedFloatRect,
 } from '../src/client/gestures.ts'
 import type { Chord, FrameGesture, GestureContext, GesturePane } from '../src/client/gestures.ts'
 import { execute } from '../src/client/execute.ts'
@@ -21,6 +21,8 @@ const CONTEXT: GestureContext = {
   activeTabId: 'tab-1' as GestureContext['activeTabId'],
   seed: 'conversation',
   panes: PANES,
+  presets: [],
+  activePreset: undefined,
 }
 
 /** A service that records the calls it receives and accepts every one of them. */
@@ -29,6 +31,11 @@ function recorder(): { service: FramesService; calls: readonly unknown[][] } {
   const note = (name: string) => (...args: unknown[]) => {
     calls.push([name, ...args])
     return ok(undefined)
+  }
+  /** The preset intents answer later, because their medium does. */
+  const later = (name: string) => (...args: unknown[]) => {
+    calls.push([name, ...args])
+    return Promise.resolve(ok(undefined))
   }
   const service = {
     registerType: note('registerType'),
@@ -49,6 +56,11 @@ function recorder(): { service: FramesService; calls: readonly unknown[][] } {
     placeFloat: note('placeFloat'),
     activeTypeId: () => undefined,
     isOpen: () => false,
+    activePresetId: () => undefined,
+    presetNames: () => [],
+    refreshPresets: later('refreshPresets'),
+    savePreset: later('savePreset'),
+    applyPreset: later('applyPreset'),
   } as unknown as FramesService
   return { service, calls }
 }
@@ -229,7 +241,28 @@ test('a caret slot is where the pointer sits among the chips', () => {
   assert.equal(caretIndex(0.1, 0, 2), 2)
 })
 
-test('one gesture is one call on the frame service', () => {
+test('switching preset walks the catalog and wraps', () => {
+  assert.equal(nextPreset(['a', 'b', 'c'], 'a'), 'b')
+  assert.equal(nextPreset(['a', 'b', 'c'], 'c'), 'a', 'the last one wraps to the first')
+  // A layout that is on no preset, or on one since deleted, starts at the top.
+  assert.equal(nextPreset(['a', 'b'], undefined), 'a')
+  assert.equal(nextPreset(['a', 'b'], 'gone'), 'a')
+  assert.equal(nextPreset([], undefined), undefined)
+})
+
+test('the preset chords name what they act on, and refuse when there is nothing to act on', () => {
+  const withPresets: GestureContext = { ...CONTEXT, presets: ['a', 'b'], activePreset: 'a' }
+
+  assert.deepEqual(chordGesture('C-x s', withPresets), { kind: 'applyPreset', name: 'b' })
+  assert.equal(chordGesture('C-x C-s', withPresets)?.kind, 'savePresetAs')
+  // Saving needs no target and no catalog, so it works on a shell with none.
+  assert.equal(chordGesture('C-x C-s', CONTEXT)?.kind, 'savePresetAs')
+  // Switching does: with an empty catalog there is nowhere to go, so the chord
+  // is inert rather than an error.
+  assert.equal(chordGesture('C-x s', CONTEXT), undefined)
+})
+
+test('one gesture is one call on the frame service', async () => {
   const cases: readonly (readonly [FrameGesture, readonly unknown[]])[] = [
     [{ kind: 'split', paneId: 'pane-1' as never, axis: 'row', seed: 'conversation' },
       ['split', 'pane-1', 'conversation', 'row']],
@@ -246,22 +279,53 @@ test('one gesture is one call on the frame service', () => {
       ['resizeSplit', 'split-1', [0.4, 0.6]]],
     [{ kind: 'placeFloat', paneId: 'pane-1' as never, rect: { x: 0, y: 0, width: 0.2, height: 0.2 } },
       ['placeFloat', 'pane-1', { x: 0, y: 0, width: 0.2, height: 0.2 }]],
+    // The IO-backed two are still one call; they just answer later.
+    [{ kind: 'savePreset', name: 'work' }, ['savePreset', 'work']],
+    [{ kind: 'applyPreset', name: 'work' }, ['applyPreset', 'work']],
   ]
 
   for (const [gesture, expected] of cases) {
     const { service, calls } = recorder()
-    assert.equal(execute(service, gesture), true)
+    assert.equal(await Promise.resolve(execute(service, gesture)), true)
     assert.deepEqual(calls, [expected], `${gesture.kind} should make exactly one call`)
   }
 })
 
-test('every gesture the layer can produce is one the service can carry out', () => {
+test('a save with no name never reaches the model under a guessed one', () => {
   const { service, calls } = recorder()
-  for (const chord of ['C-x down', 'C-x right', 'C-x f', 'C-x d', 'C-x C-d', 'M-h', 'M-j', 'M-k', 'M-l'] as const) {
-    execute(service, chordGesture(chord, CONTEXT)!)
-  }
-  execute(service, releaseGesture({ tabId: 'tab-1' as never, fromPaneId: PANES[0]!.id }, { x: 0.25, y: 0.5 }, CONTEXT))
 
-  // Nothing is left unhandled, and nothing is called twice.
-  assert.equal(calls.length, 10)
+  // The renderer resolves `savePresetAs` before dispatch; if it does not, the
+  // gesture is reported rather than saved under a name nobody chose.
+  assert.equal(execute(service, { kind: 'savePresetAs' }), false)
+  assert.deepEqual(calls, [])
+})
+
+test('a medium that throws is reported, not left as an unhandled rejection', async () => {
+  const { service } = recorder()
+  const hostile = {
+    ...service,
+    applyPreset: () => Promise.reject(new Error('the disk is full')),
+  } as FramesService
+
+  assert.equal(await Promise.resolve(execute(hostile, { kind: 'applyPreset', name: 'work' })), false)
+})
+
+test('every gesture the layer can produce is one the service can carry out', async () => {
+  const { service, calls } = recorder()
+  const chords: readonly Chord[] = [
+    'C-x down', 'C-x right', 'C-x f', 'C-x d', 'C-x C-d', 'C-x s', 'C-x C-s',
+    'M-h', 'M-j', 'M-k', 'M-l',
+  ]
+  for (const chord of chords) {
+    const gesture = chordGesture(chord, { ...CONTEXT, presets: ['work'] })
+    assert.notEqual(gesture, undefined, `${chord} should name a gesture`)
+    // `savePresetAs` is the renderer's to finish; every other chord goes straight out.
+    if (gesture?.kind !== 'savePresetAs') await Promise.resolve(execute(service, gesture!))
+  }
+  await Promise.resolve(
+    execute(service, releaseGesture({ tabId: 'tab-1' as never, fromPaneId: PANES[0]!.id }, { x: 0.25, y: 0.5 }, CONTEXT)),
+  )
+
+  // `C-x C-s` is the one chord that does not become a service call here.
+  assert.equal(calls.length, chords.length - 1 + 1)
 })

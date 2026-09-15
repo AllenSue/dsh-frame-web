@@ -40,6 +40,8 @@ test('the chords the design binds are the chords that read back', () => {
     'C-x f': [stroke('f', { ctrl: true }), true],
     'C-x d': [stroke('d'), true],
     'C-x C-d': [stroke('d', { ctrl: true }), true],
+    'C-x s': [stroke('s'), true],
+    'C-x C-s': [stroke('s', { ctrl: true }), true],
     'M-h': [stroke('h', { alt: true }), false],
     'M-j': [stroke('j', { alt: true }), false],
     'M-k': [stroke('k', { alt: true }), false],

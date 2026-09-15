@@ -57,6 +57,10 @@ export interface GestureContext {
   readonly seed: string
   /** The docked panes as drawn. */
   readonly panes: readonly GesturePane[]
+  /** Preset names the medium holds, in name order. */
+  readonly presets: readonly string[]
+  /** The preset in force, when the layout came from one. */
+  readonly activePreset: string | undefined
 }
 
 /**
@@ -84,6 +88,38 @@ export type FrameGesture =
   | { readonly kind: 'focusPane'; readonly paneId: PaneId }
   | { readonly kind: 'resizeSplit'; readonly splitId: SplitId; readonly sizes: readonly number[] }
   | { readonly kind: 'placeFloat'; readonly paneId: PaneId; readonly rect: NormalizedRect }
+  /** Save the current tree under `name`. */
+  | { readonly kind: 'savePreset'; readonly name: string }
+  /** Adopt the stored preset `name`. */
+  | { readonly kind: 'applyPreset'; readonly name: string }
+  /**
+   * Save, but under a name the user has not given yet.
+   *
+   * This is the one gesture that is not yet an operation: only the UI can ask
+   * for a name, so the renderer turns it into `savePreset` before dispatching
+   * and `execute` never sees it. It stays in the union so that a new caller
+   * cannot silently drop it.
+   */
+  | { readonly kind: 'savePresetAs' }
+
+/**
+ * Which preset a switch should land on.
+ *
+ * Cycling rather than picking, because the key map has one chord for it and no
+ * chrome to pick from: `C-x s` walks the catalog and wraps. A layout that is on
+ * no preset — or on one that has since been deleted — starts at the first.
+ * @param presets - the names the medium holds, in name order.
+ * @param active - the preset in force.
+ * @returns the next name, or `undefined` when there is nothing to switch to.
+ */
+export function nextPreset(
+  presets: readonly string[],
+  active: string | undefined,
+): string | undefined {
+  if (presets.length === 0) return undefined
+  const index = active === undefined ? -1 : presets.indexOf(active)
+  return presets[(index + 1) % presets.length]
+}
 
 /**
  * The gesture a chord asks for, or none when the chord is not bound.
@@ -114,6 +150,11 @@ export function chordGesture(chord: Chord, context: GestureContext): FrameGestur
       return context.activePaneId === undefined
         ? undefined
         : { kind: 'close', paneId: context.activePaneId }
+    case 'C-x C-s': return { kind: 'savePresetAs' }
+    case 'C-x s': {
+      const name = nextPreset(context.presets, context.activePreset)
+      return name === undefined ? undefined : { kind: 'applyPreset', name }
+    }
     case 'M-h': return { kind: 'focus', direction: 'left' }
     case 'M-j': return { kind: 'focus', direction: 'down' }
     case 'M-k': return { kind: 'focus', direction: 'up' }

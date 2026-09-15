@@ -27,6 +27,8 @@ import {
 import type { DragSession, FrameGesture, GestureContext, GestureDivider, Point } from './gestures.ts'
 import { decideKey, hasSelection, isEditing } from './keys.ts'
 import type { TypingTarget } from './keys.ts'
+import { createPresetPort } from './presets.ts'
+import type { PresetStorage } from './presets.ts'
 import { execute } from './execute.ts'
 
 /** Services this plugin needs before it activates. */
@@ -37,6 +39,39 @@ const CONVERSATION: FrameTypeDefinition = { id: 'legacy.conversation', title: ()
 
 /** How wide a divider's grab handle is drawn, in pixels. */
 const DIVIDER_GRAB = 7
+
+/**
+ * The browser medium, when there is one.
+ *
+ * A non-browser boot of this bundle (a Node e2e composing the client tree) has
+ * no `localStorage`, and a shell without presets is a shell that refuses the two
+ * preset chords — not a shell that fails to start.
+ */
+function presetPort(): ReturnType<typeof createPresetPort> | undefined {
+  try {
+    return typeof localStorage === 'undefined' ? undefined : createPresetPort(localStorage as PresetStorage)
+  } catch {
+    // Reaching `localStorage` can throw outright when a document is sandboxed
+    // without `allow-same-origin`.
+    return undefined
+  }
+}
+
+/**
+ * Ask the user for a preset name.
+ *
+ * `prompt` is the only name-entry affordance a chrome-less shell has. It is the
+ * one place a gesture needs the user before it can become an operation, which is
+ * why the vocabulary carries `savePresetAs` separately.
+ * @param suggested - the name to offer, so re-saving the active preset is one keypress.
+ * @returns the name, or `undefined` when the user cancelled or gave nothing.
+ */
+function askPresetName(suggested: string | undefined): string | undefined {
+  const answer = prompt('Save layout as preset', suggested ?? 'default')
+  if (answer === null) return undefined
+  const name = answer.trim()
+  return name === '' ? undefined : name
+}
 
 /** The projection the layer draws. */
 interface Snapshot {
@@ -109,6 +144,8 @@ function createController(service: FramesService) {
       activeTabId: focused?.tabs.find((tab) => tab.active)?.id,
       seed,
       panes: view.docked.map((pane) => ({ id: pane.id, rect: pane.rect })),
+      presets: service.presetNames(),
+      activePreset: service.activePresetId(),
     }
   }
 
@@ -120,6 +157,10 @@ function createController(service: FramesService) {
     getSnapshot: (): Snapshot => snapshot,
     /** What a chord or a drag acts on, read fresh from the last projection. */
     context,
+    /** The preset in force, which decides what a save offers to overwrite. */
+    activePreset(): string | undefined {
+      return service.activePresetId()
+    },
     /** The type a split seeds with: whatever the focused frame is showing. */
     seed(): string {
       const view = snapshot.view
@@ -227,6 +268,13 @@ function createLayer(controller: ReturnType<typeof createController>) {
         const gesture = chordGesture(decision.chord, controller.context(controller.seed()))
         if (gesture === undefined) return
         event.preventDefault()
+        // The one gesture the UI has to finish: `C-x C-s` names a preset, and a
+        // name can only come from the user.
+        if (gesture.kind === 'savePresetAs') {
+          const name = askPresetName(controller.activePreset())
+          if (name !== undefined) controller.dispatch({ kind: 'savePreset', name })
+          return
+        }
         controller.dispatch(gesture)
       }
 
@@ -467,8 +515,16 @@ export function apply(ctx: {
   }
 }): void {
   ctx.effect(() => {
-    const { service, dispose } = provideFramesService(ctx, { startup: CONVERSATION, platform: PLATFORM })
+    const { service, dispose } = provideFramesService(ctx, {
+      startup: CONVERSATION,
+      platform: PLATFORM,
+      presets: presetPort(),
+    })
     const controller = createController(service)
+    // The catalog is read once at mount; a preset written by another tab, or by
+    // a target that shares the medium, shows up on the next reload rather than
+    // costing a poll.
+    void service.refreshPresets().catch(() => undefined)
     const dropLayer = ctx.slots.register(
       {
         // `root` is the runtime's built-in slot, so this takes the window rather
