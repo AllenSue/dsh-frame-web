@@ -372,7 +372,11 @@ function createLayer(controller: ReturnType<typeof createController>) {
       },
       shown === undefined
         ? '(empty frame)'
-        : renderSlot('frames.body', {}, { entryKey: shown.typeId }) ?? shown.title),
+        : renderSlot(
+          'frames.body',
+          { rect: pane.rect, viewport: viewport(), focused: pane.id === view.active },
+          { entryKey: shown.typeId },
+        ) ?? shown.title),
       )
     })
 
@@ -445,7 +449,11 @@ function createLayer(controller: ReturnType<typeof createController>) {
       createElement('div', { key: 'body', style: { flex: '1 1 auto', minHeight: 0, overflow: 'auto' } },
         frame.tabs[0] === undefined
           ? null
-          : renderSlot('frames.body', {}, { entryKey: frame.tabs[0].typeId }) ?? frame.tabs[0].title),
+          : renderSlot(
+            'frames.body',
+            { rect: frame.rect, viewport: viewport(), focused: frame.id === view.active },
+            { entryKey: frame.tabs[0].typeId },
+          ) ?? frame.tabs[0].title),
       // The resize handle is the south-east corner, the one a window grows from.
       frame.rectHonoured
         ? createElement('div', {
