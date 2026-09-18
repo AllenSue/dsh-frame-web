@@ -5,7 +5,7 @@ import type { FramesService } from '../../frames/src/index.ts'
 import { ok } from '../../frames/src/index.ts'
 import {
   caretIndex, chordGesture, dividerDelta, draggedFloatRect, dragSizes, dropPreview, dropTargetAt,
-  nextPreset, releaseGesture, resizedFloatRect,
+  nextPreset, pickContent, releaseGesture, resizedFloatRect,
 } from '../src/client/gestures.ts'
 import type { Chord, FrameGesture, GestureContext, GesturePane } from '../src/client/gestures.ts'
 import { execute } from '../src/client/execute.ts'
@@ -23,6 +23,14 @@ const CONTEXT: GestureContext = {
   panes: PANES,
   presets: [],
   activePreset: undefined,
+  contents: [
+    { id: 'file-a', kind: 'editor', title: 'a.ts' },
+    { id: 'file-b', kind: 'editor', title: 'b.ts' },
+  ],
+  types: [
+    { id: 'editor', title: 'Editor', instantiable: true },
+    { id: 'conversation', title: 'Conversation', instantiable: false },
+  ],
 }
 
 /** A service that records the calls it receives and accepts every one of them. */
@@ -58,9 +66,14 @@ function recorder(): { service: FramesService; calls: readonly unknown[][] } {
     isOpen: () => false,
     activePresetId: () => undefined,
     presetNames: () => [],
+    contents: () => [],
+    content: () => undefined,
     refreshPresets: later('refreshPresets'),
     savePreset: later('savePreset'),
     applyPreset: later('applyPreset'),
+    showContent: note('showContent'),
+    createContent: note('createContent'),
+    paneKind: () => undefined,
   } as unknown as FramesService
   return { service, calls }
 }
@@ -262,6 +275,54 @@ test('the preset chords name what they act on, and refuse when there is nothing 
   assert.equal(chordGesture('C-x s', CONTEXT), undefined)
 })
 
+test('a typed name resolves to showing a content or making one', () => {
+  const pane = PANES[1]!.id
+
+  // An exact content id shows that content.
+  assert.deepEqual(pickContent('file-a', CONTEXT, pane), { kind: 'showContent', paneId: pane, contentId: 'file-a' })
+  // A title does too, case-insensitively.
+  assert.deepEqual(pickContent('B.TS', CONTEXT, pane), { kind: 'showContent', paneId: pane, contentId: 'file-b' })
+  // A type id makes a new one.
+  assert.deepEqual(pickContent('editor', CONTEXT, pane), { kind: 'createContent', paneId: pane, typeId: 'editor' })
+  // And a type's title.
+  assert.deepEqual(pickContent('  Editor  ', CONTEXT, pane), { kind: 'createContent', paneId: pane, typeId: 'editor' })
+})
+
+test('a name that answers to nothing resolves to nothing, rather than guessing', () => {
+  const pane = PANES[1]!.id
+
+  assert.equal(pickContent('', CONTEXT, pane), undefined)
+  assert.equal(pickContent('   ', CONTEXT, pane), undefined)
+  assert.equal(pickContent('no-such-thing', CONTEXT, pane), undefined)
+  // A type that cannot be instantiated is not an answer.
+  assert.equal(pickContent('conversation', CONTEXT, pane), undefined)
+})
+
+test('an exact id wins over a title that happens to match another', () => {
+  const pane = PANES[1]!.id
+  const tangled: GestureContext = {
+    ...CONTEXT,
+    // A content whose id is `b.ts` while another content's title is `b.ts`.
+    contents: [
+      { id: 'a.ts', kind: 'editor', title: 'b.ts' },
+      { id: 'b.ts', kind: 'editor', title: 'c.ts' },
+    ],
+  }
+
+  assert.deepEqual(
+    pickContent('b.ts', tangled, pane),
+    { kind: 'showContent', paneId: pane, contentId: 'b.ts' },
+    'the id is the address; a title is only a convenience',
+  )
+})
+
+test('a pick with no name never reaches the model', () => {
+  const { service, calls } = recorder()
+
+  assert.equal(execute(service, { kind: 'pickContent' }), false)
+  assert.deepEqual(calls, [])
+})
+
 test('one gesture is one call on the frame service', async () => {
   const cases: readonly (readonly [FrameGesture, readonly unknown[]])[] = [
     [{ kind: 'split', paneId: 'pane-1' as never, axis: 'row', seed: 'conversation' },
@@ -282,6 +343,10 @@ test('one gesture is one call on the frame service', async () => {
     // The IO-backed two are still one call; they just answer later.
     [{ kind: 'savePreset', name: 'work' }, ['savePreset', 'work']],
     [{ kind: 'applyPreset', name: 'work' }, ['applyPreset', 'work']],
+    [{ kind: 'showContent', paneId: 'pane-1' as never, contentId: 'file-a' },
+      ['showContent', 'pane-1', 'file-a']],
+    [{ kind: 'createContent', typeId: 'editor', paneId: 'pane-1' as never },
+      ['createContent', 'editor', 'pane-1']],
   ]
 
   for (const [gesture, expected] of cases) {

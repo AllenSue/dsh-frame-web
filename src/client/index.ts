@@ -26,6 +26,7 @@ import {
 } from './gestures.ts'
 import type { DragSession, FrameGesture, GestureContext, GestureDivider, Point } from './gestures.ts'
 import { decideKey, hasSelection, isEditing } from './keys.ts'
+import { pickContent } from './gestures.ts'
 import type { TypingTarget } from './keys.ts'
 import { createPresetPort } from './presets.ts'
 import type { PresetStorage } from './presets.ts'
@@ -71,6 +72,26 @@ function askPresetName(suggested: string | undefined): string | undefined {
   if (answer === null) return undefined
   const name = answer.trim()
   return name === '' ? undefined : name
+}
+
+/**
+ * Ask which content to bring up.
+ *
+ * The console is told what there is, so the answer can be a name rather than a
+ * memorised id, and the same box serves both cases: naming something already
+ * made shows it, naming a type makes another one.
+ * @param context - what the shell holds and which types it can make.
+ * @returns what the user typed, or an empty string when they cancelled.
+ */
+function askContentName(context: GestureContext): string {
+  const held = context.contents.map((content) => content.title)
+  const makeable = context.types.filter((type) => type.instantiable).map((type) => type.title)
+  const hint = [
+    held.length === 0 ? '' : `open: ${held.join(', ')}`,
+    makeable.length === 0 ? '' : `new: ${makeable.join(', ')}`,
+  ].filter((part) => part !== '').join('\n')
+  const answer = prompt(`Show content\n${hint}`, '')
+  return answer ?? ''
 }
 
 /** The projection the layer draws. */
@@ -146,6 +167,19 @@ function createController(service: FramesService) {
       panes: view.docked.map((pane) => ({ id: pane.id, rect: pane.rect })),
       presets: service.presetNames(),
       activePreset: service.activePresetId(),
+      contents: service.contents().map((content) => ({
+        id: content.id,
+        kind: content.kind,
+        title: content.title,
+      })),
+      // The type list comes from the projection: the core lists what is
+      // registered and says which of them can be made, and decides nothing else
+      // about what a picker shows.
+      types: snapshot.view.types.map((type) => ({
+        id: type.id,
+        title: type.title,
+        instantiable: type.instantiable,
+      })),
     }
   }
 
@@ -175,6 +209,40 @@ function createController(service: FramesService) {
       execute(service, gesture)
     },
   }
+}
+
+/**
+ * What an empty frame draws: the types that can be made here.
+ *
+ * An empty frame is not a broken one — it is a frame waiting to be told what to
+ * show, and the list of answers is whatever plugins have registered. The
+ * renderer decides nothing about the list; it draws the projection's and sends
+ * back which one was chosen.
+ * @param view - the projection, for the registered types.
+ * @param paneId - the frame the choice is for.
+ * @param controller - the one way a gesture becomes a change.
+ * @returns the picker, or a note when nothing can be made at all.
+ */
+function createPicker(
+  view: Snapshot['view'],
+  paneId: PaneId,
+  controller: ReturnType<typeof createController>,
+): unknown {
+  const offered = view.types.filter((type) => type.instantiable)
+  if (offered.length === 0) {
+    return createElement('div', {
+      style: { padding: '12px', color: '#98a1b0' },
+    }, 'Nothing here can make a content: no plugin declared one.')
+  }
+  return createElement('div', {
+    style: { padding: '12px', display: 'flex', flexDirection: 'column', gap: '6px', overflow: 'auto' },
+  },
+  createElement('div', { key: 'title', style: { color: '#98a1b0', marginBottom: '4px' } }, 'New content'),
+  offered.map((type) => createElement('div', {
+    key: type.id,
+    onClick: () => { controller.dispatch({ kind: 'createContent', typeId: type.id, paneId }) },
+    style: { cursor: 'pointer', padding: '4px 8px', border: '1px solid #39404c', borderRadius: '4px' },
+  }, type.title)))
 }
 
 /**
@@ -275,6 +343,16 @@ function createLayer(controller: ReturnType<typeof createController>) {
           if (name !== undefined) controller.dispatch({ kind: 'savePreset', name })
           return
         }
+        // And the other: `C-x b` names a content or a type, and a person should
+        // not have to say which of the two they mean.
+        if (gesture.kind === 'pickContent') {
+          const context = controller.context(controller.seed())
+          const paneId = context.activePaneId
+          if (paneId === undefined) return
+          const resolved = pickContent(askContentName(context), context, paneId)
+          if (resolved !== undefined) controller.dispatch(resolved)
+          return
+        }
         controller.dispatch(gesture)
       }
 
@@ -371,7 +449,7 @@ function createLayer(controller: ReturnType<typeof createController>) {
         style: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' },
       },
       shown === undefined
-        ? '(empty frame)'
+        ? createPicker(view, pane.id, controller)
         : renderSlot(
           'frames.body',
           { rect: pane.rect, viewport: viewport(), focused: pane.id === view.active },

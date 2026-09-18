@@ -61,6 +61,24 @@ export interface GestureContext {
   readonly presets: readonly string[]
   /** The preset in force, when the layout came from one. */
   readonly activePreset: string | undefined
+  /** Contents the shell holds, whether or not a frame is showing one. */
+  readonly contents: readonly GestureContent[]
+  /** Registered types, in registration order; a picker lists the instantiable ones. */
+  readonly types: readonly GestureType[]
+}
+
+/** A content, as a switch would name it. */
+export interface GestureContent {
+  readonly id: string
+  readonly kind: string
+  readonly title: string
+}
+
+/** A registered type, as a picker lists it. */
+export interface GestureType {
+  readonly id: string
+  readonly title: string
+  readonly instantiable: boolean
 }
 
 /**
@@ -101,6 +119,19 @@ export type FrameGesture =
    * cannot silently drop it.
    */
   | { readonly kind: 'savePresetAs' }
+  /** Show an existing content in a pane. */
+  | { readonly kind: 'showContent'; readonly paneId: PaneId; readonly contentId: string }
+  /** Make one new instance of a type and show it in a pane. */
+  | { readonly kind: 'createContent'; readonly typeId: string; readonly paneId: PaneId }
+  /**
+   * Bring a content up, by a name only the user can supply.
+   *
+   * `switch-to-buffer`, and the same shape as `savePresetAs`: the renderer asks
+   * for the name and resolves it to one of the two gestures above. Either answer
+   * is legitimate — naming something already made shows it, naming a type makes
+   * another one — which is why one chord covers both.
+   */
+  | { readonly kind: 'pickContent' }
 
 /**
  * Which preset a switch should land on.
@@ -119,6 +150,42 @@ export function nextPreset(
   if (presets.length === 0) return undefined
   const index = active === undefined ? -1 : presets.indexOf(active)
   return presets[(index + 1) % presets.length]
+}
+
+/**
+ * What a typed answer means.
+ *
+ * One command covers "show me that" and "make me one", because a person naming
+ * a thing should not have to say which it is. An exact id wins over a title, and
+ * a content already made wins over making another — the same preference
+ * `switch-to-buffer` has, and the one that does not quietly pile up duplicates.
+ * @param answer - what the user typed.
+ * @param context - the contents and types the shell knows.
+ * @param paneId - the pane it would be shown in.
+ * @returns the gesture, or `undefined` when nothing answers to that name.
+ */
+export function pickContent(
+  answer: string,
+  context: GestureContext,
+  paneId: PaneId,
+): FrameGesture | undefined {
+  const wanted = answer.trim()
+  if (wanted === '') return undefined
+  const lower = wanted.toLowerCase()
+
+  const byId = context.contents.find((content) => content.id === wanted)
+  if (byId !== undefined) return { kind: 'showContent', paneId, contentId: byId.id }
+
+  const typeById = context.types.find((type) => type.id === wanted && type.instantiable)
+  if (typeById !== undefined) return { kind: 'createContent', paneId, typeId: typeById.id }
+
+  const byTitle = context.contents.find((content) => content.title.toLowerCase() === lower)
+  if (byTitle !== undefined) return { kind: 'showContent', paneId, contentId: byTitle.id }
+
+  const typeByTitle = context.types.find((type) => type.instantiable && type.title.toLowerCase() === lower)
+  return typeByTitle === undefined
+    ? undefined
+    : { kind: 'createContent', paneId, typeId: typeByTitle.id }
 }
 
 /**
@@ -151,6 +218,7 @@ export function chordGesture(chord: Chord, context: GestureContext): FrameGestur
         ? undefined
         : { kind: 'close', paneId: context.activePaneId }
     case 'C-x C-s': return { kind: 'savePresetAs' }
+    case 'C-x b': return { kind: 'pickContent' }
     case 'C-x s': {
       const name = nextPreset(context.presets, context.activePreset)
       return name === undefined ? undefined : { kind: 'applyPreset', name }

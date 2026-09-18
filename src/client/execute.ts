@@ -86,6 +86,17 @@ export function execute(service: FramesService, gesture: FrameGesture): Executed
       // saving under a name nobody chose.
       console.warn('[frames] a save with no name reached execute; the renderer resolves it first')
       return false
+    case 'showContent':
+      result = service.showContent(gesture.paneId, gesture.contentId)
+      break
+    case 'createContent':
+      result = service.createContent(gesture.typeId, gesture.paneId)
+      break
+    case 'pickContent':
+      // Likewise: the name comes from the user, so the renderer resolves this
+      // into `showContent` or `createContent` before dispatching.
+      console.warn('[frames] a pick with no name reached execute; the renderer resolves it first')
+      return false
   }
   report(result)
   return result.ok
