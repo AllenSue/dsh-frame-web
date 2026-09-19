@@ -88,12 +88,17 @@ export interface GestureType {
  * exactly one place where a gesture becomes a call on the frame service.
  */
 export type FrameGesture =
-  /** Split the focused pane; the key map's own way to make a new pane. */
+  /**
+   * Split the focused pane; the key map's own way to make a new frame.
+   *
+   * The new frame is **empty**, and an empty frame offers what can be made in
+   * it. Seeding it with the type already beside it would be a copy — the thing
+   * a person asked for is a frame, and what goes in it is the next question.
+   */
   | {
     readonly kind: 'split'
     readonly paneId: PaneId
     readonly axis: 'row' | 'column'
-    readonly seed: string
   }
   /** Release a dragged chip: what the pointer does instead. */
   | { readonly kind: 'drop'; readonly tabId: TabId; readonly target: DropTarget; readonly seed: string }
@@ -201,7 +206,7 @@ export function chordGesture(chord: Chord, context: GestureContext): FrameGestur
   const split = (axis: 'row' | 'column'): FrameGesture | undefined =>
     context.activePaneId === undefined
       ? undefined
-      : { kind: 'split', paneId: context.activePaneId, axis, seed: context.seed }
+      : { kind: 'split', paneId: context.activePaneId, axis }
   switch (chord) {
     case 'C-x right': return split('row')
     case 'C-x down': return split('column')

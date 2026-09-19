@@ -127,8 +127,11 @@ test('the preview draws the same area the release would fill', () => {
 })
 
 test('every bound chord names an operation, and an unbound one names nothing', () => {
+  // `C-x s` is deliberately absent: it needs a catalog to cycle, and has its own
+  // test below with one.
   const bound: readonly Chord[] = [
-    'C-x down', 'C-x right', 'C-x f', 'C-x d', 'C-x C-d', 'M-h', 'M-j', 'M-k', 'M-l',
+    'C-x down', 'C-x right', 'C-x f', 'C-x d', 'C-x C-d', 'C-x C-s', 'C-x b',
+    'M-h', 'M-j', 'M-k', 'M-l',
   ]
   for (const chord of bound) {
     const gesture = chordGesture(chord, CONTEXT)
@@ -138,11 +141,12 @@ test('every bound chord names an operation, and an unbound one names nothing', (
   assert.equal(chordGesture('C-x f', CONTEXT)?.kind, 'float')
   assert.equal(chordGesture('C-x d', CONTEXT)?.kind, 'dock')
   // The two splits are the only ones the key map offers, and they differ by axis.
+  // Neither carries a seed: a new frame starts empty and offers what can be made.
   assert.deepEqual(chordGesture('C-x right', CONTEXT), {
-    kind: 'split', paneId: 'pane-1', axis: 'row', seed: 'conversation',
+    kind: 'split', paneId: 'pane-1', axis: 'row',
   })
   assert.deepEqual(chordGesture('C-x down', CONTEXT), {
-    kind: 'split', paneId: 'pane-1', axis: 'column', seed: 'conversation',
+    kind: 'split', paneId: 'pane-1', axis: 'column',
   })
 })
 
@@ -325,8 +329,10 @@ test('a pick with no name never reaches the model', () => {
 
 test('one gesture is one call on the frame service', async () => {
   const cases: readonly (readonly [FrameGesture, readonly unknown[]])[] = [
-    [{ kind: 'split', paneId: 'pane-1' as never, axis: 'row', seed: 'conversation' },
-      ['split', 'pane-1', 'conversation', 'row']],
+    // A key split makes an *empty* frame, so the new one offers what can be made
+    // in it rather than copying the frame beside it.
+    [{ kind: 'split', paneId: 'pane-1' as never, axis: 'row' },
+      ['split', 'pane-1', undefined, 'row']],
     [{ kind: 'drop', tabId: 'tab-1' as never, target: { kind: 'float' }, seed: 'conversation' },
       ['drop', 'tab-1', { kind: 'float' }, 'conversation']],
     [{ kind: 'placeTab', tabId: 'tab-1' as never, paneId: 'pane-1' as never, index: 2 },

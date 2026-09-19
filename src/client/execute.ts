@@ -47,7 +47,8 @@ export function execute(service: FramesService, gesture: FrameGesture): Executed
   let result: FrameResult<unknown>
   switch (gesture.kind) {
     case 'split':
-      result = service.split(gesture.paneId, gesture.seed, gesture.axis)
+      // No seed: the frame is made empty, so it can offer what can be made in it.
+      result = service.split(gesture.paneId, undefined, gesture.axis)
       break
     case 'drop':
       result = service.drop(gesture.tabId, gesture.target, gesture.seed)
