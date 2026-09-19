@@ -110,7 +110,6 @@ classDiagram
     }
     class Active {
         <<union>>
-        chip: session + seed
         float: paneId + corner + start + from
         divider: divider + from
     }
@@ -204,19 +203,16 @@ classDiagram
 
 ### 3.1 手势语言（纯函数）
 
+> **拖的永远是 frame，从来不是 tab。** 一格显示一个 content，所以没有 chip 可捡：指针只命名分隔条与浮窗，别的什么都不命名。把内容挪到别格是 `showContent(paneId, contentId)` 一次服务调用——插件自己的 tab 条同样能发这一次调用，而外壳不再替它发。
+
 ```mermaid
 classDiagram
     class Gestures {
         <<module>>
-        +contains(rect, point) boolean
-        +dropTargetAt(panes, point, band?) DropTarget
-        +releaseGesture(session, point, ctx) FrameGesture
-        +dropPreview(target, panes) NormalizedRect
         +dragSizes(divider, delta) number[]
         +dividerDelta(divider, delta, viewport) number
         +draggedFloatRect(start, delta) NormalizedRect
         +resizedFloatRect(start, delta, corner) NormalizedRect
-        +caretIndex(local, chip, count) number
         +chordGesture(chord, ctx) FrameGesture
         +nextPreset(presets, active) string
     }
@@ -306,7 +302,7 @@ ctx.slots.register({
 
 | 套件 | 守什么 |
 |---|---|
-| `gestures.test.ts` | 区域判定、夹取、归约、预览与释放用同一条规则、**一个手势一次调用** |
+| `gestures.test.ts` | 分隔条拖拽的夹取与单位换算、浮窗拖动/缩放的边界、**一个手势一次调用** |
 | `keys.test.ts` | 输入框内触发、`C-x` 与剪切的冲突、未绑定的键不被吞、前导只活一次按键 |
 | `picker.test.ts` | 候选构成（不可实例化的类型不进列表）、空查询保留全部、四个匹配档位与排序、光标环绕且不越界、每行对应的手势 |
 | `presets.test.ts` | 命名空间、坏条目读作不存在、两个 port 互不干扰 |
@@ -326,11 +322,13 @@ ctx.slots.register({
 | 行从哪来 | `pickerChoices(view)`：投影的 `contents` + 可实例化的 `types` | 渲染端不认识内容，只认识投影；核心因此不需要为这个 UI 加任何东西 |
 | 查询怎么排 | `matchChoices(choices, query)`：id/标题**完全相同** → 前缀 → 子串 → 子序列 | 人打 `dpr` 是想找 `document-preview`，打 `doc` 是想让文档预览排第一；同档保持列表原序，列表不会在光标下重排 |
 | 光标怎么动 | `pickerKey(state, choices, key)`：↑↓ 环绕，且始终被夹在**过滤后**的列表里 | 过滤让列表变短时，光标不能留在末尾之外 |
-| 选一行做什么 | `choiceGesture(choice, paneId)`：`open` 组 → **`openContent`**；`new` 组 → `createContent` | `open` 是 `switch-to-buffer`：**显示它**，由核心决定落在哪一格（已在显示就聚焦那一格，否则在当前 frame 旁开一格）。`showContent`（"就显示在**这一格**"）是一 pane 一 kind 的规则允许被拒的问题——而中心那格已经装着会话时，它对其它任何内容都会拒。`new` 要指名 pane，因为造出来的东西总得有个落点，而用户当时所在的 frame 就是他要的答案 |
+| 选一行做什么 | `choiceGesture(choice, paneId)`：`open` 组 → **`openContent`**；`new` 组 → `createContent` | `open` 是 `switch-to-buffer`：**显示它**，由核心决定落在哪一格（已在显示就聚焦那一格，否则在当前 frame 旁开一格）。`showContent`（"就显示在**这一格**"）是"一格一个 content **换掉**"的问题——`new` 要指名 pane，因为造出来的东西总得有个落点，而用户当时所在的 frame 就是他要的答案 |
 
 **它是模态的，而且这是刻意的。** 别处的规则是"输入框里也能用快捷键"（§2.2），因为那是为了不让人把手从键盘挪开；而这个对话框**本身就是**一次快捷键的收尾，所以它开着的期间每一次按键都属于查询：全局键层让位，对话框只留 ↑↓ / Enter / Esc（Esc 也由全局那一层兜住，因为点一下行会把焦点移出输入框）。
 
-空 frame 里那版选择器（§4/`createPicker`）用的是同一批行与同一个 `choiceGesture` 的**另一面**：它在那格里说"就显示在这儿"（`showContent`）——空 pane 接得住任何 kind，所以那句话在那里不会被拒。两个入口的区别是"显示它"与"显示在这儿"，各自诚实。
+空 frame 里那版选择器（§4/`createPicker`）用的是同一批行与同一个 `choiceGesture` 的**另一面**：它在那格里说"就显示在这儿"（`showContent`）——那一格是空的，所以那句话在这里就是"这一格从此显示它"。
+
+> **一格就是 body，没有别的 chrome。** 渲染端不再画 tab 条、不再画 chip：一个 frame 的整个面积就是它显示的那个内容的面积（正在等选择的那一格画的是选择器）。tab 条曾经兼任"frame 的抓手"，所以指针的分屏/拖出随之退场——分屏留给键位 `C-x right` / `C-x down`，浮窗仍有标题栏可拖。这条代价记在台账 T23 里。
 
 ### 7.1 被拒绝的操作必须看得见
 

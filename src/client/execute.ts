@@ -12,6 +12,11 @@
  * against a recording stub rather than a browser. The preset intents are the one
  * part that is not synchronous, because the medium is IO; they still make exactly
  * one call each.
+ *
+ * It maps the gestures a renderer can produce, and no others: the tab-level ones
+ * (`drop`, `placeTab`) left with the tab strip, because a shell that shows one
+ * content per frame has no chip to drag. The core still answers those intents —
+ * with a refusal, in its own words — for a caller that asks anyway.
  */
 import type { FrameResult, FramesService } from '../../../frames/src/index.ts'
 import type { FrameGesture } from './gestures.ts'
@@ -66,12 +71,6 @@ export function execute(
     case 'split':
       // No seed: the frame is made empty, so it can offer what can be made in it.
       result = service.split(gesture.paneId, undefined, gesture.axis)
-      break
-    case 'drop':
-      result = service.drop(gesture.tabId, gesture.target, gesture.seed)
-      break
-    case 'placeTab':
-      result = service.placeTab(gesture.tabId, gesture.paneId, gesture.index)
       break
     case 'close':
       result = service.close(gesture.paneId)

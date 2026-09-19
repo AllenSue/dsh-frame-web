@@ -4,33 +4,22 @@ import assert from 'node:assert/strict'
 import type { FramesService } from '../../frames/src/index.ts'
 import { fail, ok } from '../../frames/src/index.ts'
 import {
-  caretIndex, chordGesture, dividerDelta, draggedFloatRect, dragSizes, dropPreview, dropTargetAt,
-  nextPreset, releaseGesture, resizedFloatRect,
+  chordGesture, dividerDelta, draggedFloatRect, dragSizes, nextPreset, resizedFloatRect,
 } from '../src/client/gestures.ts'
-import type { Chord, FrameGesture, GestureContext, GesturePane } from '../src/client/gestures.ts'
+import type { Chord, FrameGesture, GestureContext } from '../src/client/gestures.ts'
 import { execute } from '../src/client/execute.ts'
 
-/** Two panes side by side, as the projection would hand them over. */
-const PANES: readonly GesturePane[] = [
-  { id: 'pane-1' as GesturePane['id'], rect: { x: 0, y: 0, width: 0.5, height: 1 } },
-  { id: 'pane-2' as GesturePane['id'], rect: { x: 0.5, y: 0, width: 0.5, height: 1 } },
-]
-
+/**
+ * What a chord reads.
+ *
+ * It is small because the layer stopped having a tab strip: no focused chip, no
+ * pane list to drop onto. What is left is the frame a chord acts on and the
+ * preset catalog it switches through.
+ */
 const CONTEXT: GestureContext = {
-  activePaneId: PANES[0]!.id,
-  activeTabId: 'tab-1' as GestureContext['activeTabId'],
-  seed: 'conversation',
-  panes: PANES,
+  activePaneId: 'pane-1' as GestureContext['activePaneId'],
   presets: [],
   activePreset: undefined,
-  contents: [
-    { id: 'file-a', kind: 'editor', title: 'a.ts' },
-    { id: 'file-b', kind: 'editor', title: 'b.ts' },
-  ],
-  types: [
-    { id: 'editor', title: 'Editor', instantiable: true },
-    { id: 'conversation', title: 'Conversation', instantiable: false },
-  ],
 }
 
 /** A service that records the calls it receives and accepts every one of them. */
@@ -79,54 +68,6 @@ function recorder(): { service: FramesService; calls: readonly unknown[][] } {
   return { service, calls }
 }
 
-test('a release in the middle of a pane moves the frame in', () => {
-  const target = dropTargetAt(PANES, { x: 0.25, y: 0.5 })
-  assert.deepEqual(target, { kind: 'dock', paneId: 'pane-1', zone: 'center' })
-})
-
-test('a release near an edge names that edge, and the nearest one wins a corner', () => {
-  assert.equal(dropTargetAt(PANES, { x: 0.03, y: 0.5 })?.kind, 'dock')
-  assert.deepEqual(dropTargetAt(PANES, { x: 0.03, y: 0.5 }), { kind: 'dock', paneId: 'pane-1', zone: 'left' })
-  assert.deepEqual(dropTargetAt(PANES, { x: 0.47, y: 0.5 }), { kind: 'dock', paneId: 'pane-1', zone: 'right' })
-  assert.deepEqual(dropTargetAt(PANES, { x: 0.25, y: 0.02 }), { kind: 'dock', paneId: 'pane-1', zone: 'top' })
-  assert.deepEqual(dropTargetAt(PANES, { x: 0.25, y: 0.98 }), { kind: 'dock', paneId: 'pane-1', zone: 'bottom' })
-  // In the top-left corner the nearer edge is the top one, because y is smaller.
-  assert.deepEqual(dropTargetAt(PANES, { x: 0.02, y: 0.01 }), { kind: 'dock', paneId: 'pane-1', zone: 'top' })
-})
-
-test('a release over no pane at all has no target, which is what floating means', () => {
-  assert.equal(dropTargetAt(PANES, { x: 1.4, y: 0.5 }), undefined)
-  assert.equal(dropTargetAt([], { x: 0.5, y: 0.5 }), undefined)
-})
-
-test('a release is the only moment a drag becomes a gesture', () => {
-  const session = { tabId: 'tab-1' as never, fromPaneId: PANES[0]!.id }
-
-  assert.deepEqual(releaseGesture(session, { x: 0.25, y: 0.5 }, CONTEXT), {
-    kind: 'drop',
-    tabId: 'tab-1',
-    target: { kind: 'dock', paneId: 'pane-1', zone: 'center' },
-    seed: 'conversation',
-  })
-  assert.deepEqual(releaseGesture(session, { x: 3, y: 3 }, CONTEXT), {
-    kind: 'drop',
-    tabId: 'tab-1',
-    target: { kind: 'float' },
-    seed: 'conversation',
-  })
-})
-
-test('the preview draws the same area the release would fill', () => {
-  const target = dropTargetAt(PANES, { x: 0.03, y: 0.5 })
-  assert.deepEqual(dropPreview(target!, PANES), { x: 0, y: 0, width: 0.25, height: 1 })
-
-  const centre = dropTargetAt(PANES, { x: 0.25, y: 0.5 })
-  assert.deepEqual(dropPreview(centre!, PANES), PANES[0]!.rect)
-
-  // A release over nothing would make a window, which has no docked area to draw.
-  assert.equal(dropPreview({ kind: 'float' }, PANES), undefined)
-})
-
 test('every bound chord names an operation, and an unbound one names nothing', () => {
   // `C-x s` is deliberately absent: it needs a catalog to cycle, and has its own
   // test below with one.
@@ -152,7 +93,7 @@ test('every bound chord names an operation, and an unbound one names nothing', (
 })
 
 test('a chord with nothing focused refuses to name a target', () => {
-  const idle: GestureContext = { ...CONTEXT, activePaneId: undefined, activeTabId: undefined }
+  const idle: GestureContext = { ...CONTEXT, activePaneId: undefined }
 
   assert.equal(chordGesture('C-x right', idle), undefined)
   assert.equal(chordGesture('C-x f', idle), undefined)
@@ -251,14 +192,6 @@ test('a resize cannot shrink a floating frame away, nor push it off screen', () 
   assert.ok(wide.x + wide.width <= 1.0001)
 })
 
-test('a caret slot is where the pointer sits among the chips', () => {
-  assert.equal(caretIndex(0, 0.25, 3), 0)
-  assert.equal(caretIndex(0.6, 0.25, 3), 2)
-  // Dropping past the last chip lands at the end, and so does an impossible slot.
-  assert.equal(caretIndex(5, 0.25, 2), 2)
-  assert.equal(caretIndex(0.1, 0, 2), 2)
-})
-
 test('switching preset walks the catalog and wraps', () => {
   assert.equal(nextPreset(['a', 'b', 'c'], 'a'), 'b')
   assert.equal(nextPreset(['a', 'b', 'c'], 'c'), 'a', 'the last one wraps to the first')
@@ -300,10 +233,6 @@ test('one gesture is one call on the frame service', async () => {
     // in it rather than copying the frame beside it.
     [{ kind: 'split', paneId: 'pane-1' as never, axis: 'row' },
       ['split', 'pane-1', undefined, 'row']],
-    [{ kind: 'drop', tabId: 'tab-1' as never, target: { kind: 'float' }, seed: 'conversation' },
-      ['drop', 'tab-1', { kind: 'float' }, 'conversation']],
-    [{ kind: 'placeTab', tabId: 'tab-1' as never, paneId: 'pane-1' as never, index: 2 },
-      ['placeTab', 'tab-1', 'pane-1', 2]],
     [{ kind: 'close', paneId: 'pane-1' as never }, ['close', 'pane-1']],
     [{ kind: 'float', paneId: 'pane-1' as never }, ['float', 'pane-1']],
     [{ kind: 'dock', paneId: 'pane-1' as never }, ['dock', 'pane-1']],
@@ -369,7 +298,7 @@ test('a medium that throws is reported, not left as an unhandled rejection', asy
   assert.equal(await Promise.resolve(execute(hostile, { kind: 'applyPreset', name: 'work' })), false)
 })
 
-test('every gesture the layer can produce is one the service can carry out', async () => {
+test('every chord the layer binds is one the service can carry out', async () => {
   const { service, calls } = recorder()
   const chords: readonly Chord[] = [
     'C-x down', 'C-x right', 'C-x f', 'C-x d', 'C-x C-d', 'C-x s', 'C-x C-s',
@@ -381,10 +310,7 @@ test('every gesture the layer can produce is one the service can carry out', asy
     // `savePresetAs` is the renderer's to finish; every other chord goes straight out.
     if (gesture?.kind !== 'savePresetAs') await Promise.resolve(execute(service, gesture!))
   }
-  await Promise.resolve(
-    execute(service, releaseGesture({ tabId: 'tab-1' as never, fromPaneId: PANES[0]!.id }, { x: 0.25, y: 0.5 }, CONTEXT)),
-  )
 
   // `C-x C-s` is the one chord that does not become a service call here.
-  assert.equal(calls.length, chords.length - 1 + 1)
+  assert.equal(calls.length, chords.length - 1)
 })

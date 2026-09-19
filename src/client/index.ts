@@ -18,13 +18,12 @@
 import { createElement, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { REACT_CAPABILITIES, provideFramesService, project } from '../../../frames/src/index.ts'
 import type {
-  FrameTypeDefinition, FramesService, NormalizedRect, PaneId, TabId,
+  FrameTypeDefinition, FramesService, NormalizedRect, PaneId,
 } from '../../../frames/src/index.ts'
 import {
-  chordGesture, dividerDelta, draggedFloatRect, dragSizes, dropPreview, releaseGesture,
-  resizedFloatRect,
+  chordGesture, dividerDelta, draggedFloatRect, dragSizes, resizedFloatRect,
 } from './gestures.ts'
-import type { DragSession, FrameGesture, GestureContext, GestureDivider, Point } from './gestures.ts'
+import type { FrameGesture, GestureContext, GestureDivider, Point } from './gestures.ts'
 import { decideKey, hasSelection, isEditing } from './keys.ts'
 import type { TypingTarget } from './keys.ts'
 import { choiceGesture, matchChoices, pickerChoices, pickerKey } from './picker.ts'
@@ -98,7 +97,6 @@ const at = (event: { readonly clientX: number; readonly clientY: number }): Poin
 
 /** What the layer is in the middle of, if anything. Never reaches the tree. */
 type Active =
-  | { readonly kind: 'chip'; readonly session: DragSession; readonly seed: string }
   | {
     readonly kind: 'float'
     readonly paneId: PaneId
@@ -139,29 +137,12 @@ function createController(service: FramesService) {
   })
   service.reportMeasurements({ viewport: viewport() })
 
-  const context = (seed: string): GestureContext => {
+  const context = (): GestureContext => {
     const view = snapshot.view
-    const focused = view.docked.find((pane) => pane.id === view.active)
     return {
       activePaneId: view.active,
-      activeTabId: focused?.tabs.find((tab) => tab.active)?.id,
-      seed,
-      panes: view.docked.map((pane) => ({ id: pane.id, rect: pane.rect })),
       presets: service.presetNames(),
       activePreset: service.activePresetId(),
-      contents: service.contents().map((content) => ({
-        id: content.id,
-        kind: content.kind,
-        title: content.title,
-      })),
-      // The type list comes from the projection: the core lists what is
-      // registered and says which of them can be made, and decides nothing else
-      // about what a picker shows.
-      types: snapshot.view.types.map((type) => ({
-        id: type.id,
-        title: type.title,
-        instantiable: type.instantiable,
-      })),
     }
   }
 
@@ -171,17 +152,11 @@ function createController(service: FramesService) {
       return () => { listeners.delete(listener) }
     },
     getSnapshot: (): Snapshot => snapshot,
-    /** What a chord or a drag acts on, read fresh from the last projection. */
+    /** What a chord acts on, read fresh from the last projection. */
     context,
     /** The preset in force, which decides what a save offers to overwrite. */
     activePreset(): string | undefined {
       return service.activePresetId()
-    },
-    /** The type a split seeds with: whatever the focused frame is showing. */
-    seed(): string {
-      const view = snapshot.view
-      const focused = view.docked.find((pane) => pane.id === view.active)
-      return focused?.tabs.find((tab) => tab.active)?.typeId ?? CONVERSATION.id
     },
     remeasure(): void {
       service.reportMeasurements({ viewport: viewport() })
@@ -468,18 +443,12 @@ function createLayer(controller: ReturnType<typeof createController>) {
       const onMove = (event: PointerEvent): void => {
         const running = active.current
         if (running === undefined) return
-        const point = at(event)
-        if (running.kind === 'float') {
-          const delta = { x: point.x - running.from.x, y: point.y - running.from.y }
-          setPreview(running.corner === undefined
-            ? draggedFloatRect(running.start, delta)
-            : resizedFloatRect(running.start, delta, running.corner))
-          return
-        }
         if (running.kind === 'divider') return
-        const context = controller.context(running.seed)
-        const gesture = releaseGesture(running.session, point, context)
-        setPreview(gesture.kind === 'drop' ? dropPreview(gesture.target, context.panes) : undefined)
+        const point = at(event)
+        const delta = { x: point.x - running.from.x, y: point.y - running.from.y }
+        setPreview(running.corner === undefined
+          ? draggedFloatRect(running.start, delta)
+          : resizedFloatRect(running.start, delta, running.corner))
       }
 
       // The release is the only moment the tree hears about a drag.
@@ -489,10 +458,6 @@ function createLayer(controller: ReturnType<typeof createController>) {
         setPreview(undefined)
         if (running === undefined) return
         const point = at(event)
-        if (running.kind === 'chip') {
-          run(releaseGesture(running.session, point, controller.context(running.seed)))
-          return
-        }
         if (running.kind === 'divider') {
           const extent = viewport()
           const delta = dividerDelta(running.divider, {
@@ -548,7 +513,7 @@ function createLayer(controller: ReturnType<typeof createController>) {
           event.preventDefault()
           return
         }
-        const gesture = chordGesture(decision.chord, controller.context(controller.seed()))
+        const gesture = chordGesture(decision.chord, controller.context())
         if (gesture === undefined) return
         event.preventDefault()
         // One gesture the UI has to finish: `C-x C-s` names a preset, and a new
@@ -562,7 +527,7 @@ function createLayer(controller: ReturnType<typeof createController>) {
         // a choice — so it opens the picker over the pane that had focus, and the
         // choice itself becomes the gesture.
         if (gesture.kind === 'pickContent') {
-          const paneId = controller.context(controller.seed()).activePaneId
+          const paneId = controller.context().activePaneId
           if (paneId === undefined) return
           setPicker({ paneId, query: '', index: 0 })
           return
@@ -601,49 +566,7 @@ function createLayer(controller: ReturnType<typeof createController>) {
     const overlay = renderSlot('frames.overlay', {})
 
     const frames = view.docked.map((pane) => {
-      const shown = pane.tabs.find((tab) => tab.active) ?? pane.tabs[0]
-      // The strip is always drawn: it is the frame's grab handle, and with more
-      // than one chip it is also where a chip is picked up and put down.
-      const strip = createElement('div', {
-        key: 'strip',
-        onPointerDown: (event: { stopPropagation(): void }) => {
-          stop(event)
-          run({ kind: 'focusPane', paneId: pane.id })
-        },
-        style: {
-          display: 'flex',
-          flex: '0 0 auto',
-          height: '22px',
-          borderBottom: '1px solid #39404c',
-          background: '#171a20',
-          fontSize: '12px',
-          overflow: 'hidden',
-        },
-      }, pane.tabs.map((tab) => createElement('div', {
-        key: tab.id,
-        onPointerDown: (event: { stopPropagation(): void }) => {
-          stop(event)
-          run({ kind: 'focusPane', paneId: pane.id })
-          begin({
-            kind: 'chip',
-            session: { tabId: tab.id as TabId, fromPaneId: pane.id },
-            seed: tab.typeId,
-          })
-        },
-        style: {
-          flex: '0 1 auto',
-          maxWidth: '14em',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-          padding: '3px 8px',
-          cursor: 'grab',
-          color: tab.active ? '#e6e9ef' : '#98a1b0',
-          background: tab.active ? '#2b3442' : 'transparent',
-          borderRight: '1px solid #39404c',
-        },
-      }, tab.title)))
-
+      const shown = pane.content
       return createElement('div', {
         key: pane.id,
         // Focus follows a click anywhere in the frame, but the event is *not*
@@ -663,9 +586,10 @@ function createLayer(controller: ReturnType<typeof createController>) {
           overflow: 'hidden',
         },
       },
-      strip,
-      // The frame's content is whatever its type's body supplies; a type with no
-      // registered body still shows its title, so an empty frame reads as one.
+      // The frame draws no chrome: it *is* the body. One frame, one content —
+      // and a content that has tabs inside it (an editor with its files, a panel
+      // with its pages) draws them itself, because they are its own state. A
+      // frame waiting for a choice offers one instead of a body.
       createElement('div', {
         key: 'body',
         // The body must be able to fill: a flex child with no basis keeps its
@@ -747,15 +671,15 @@ function createLayer(controller: ReturnType<typeof createController>) {
           borderBottom: '1px solid #39404c',
           cursor: frame.rectHonoured ? 'move' : 'default',
         },
-      }, frame.tabs[0]?.title ?? '(empty frame)'),
+      }, frame.content?.title ?? '(empty frame)'),
       createElement('div', { key: 'body', style: { flex: '1 1 auto', minHeight: 0, overflow: 'auto' } },
-        frame.tabs[0] === undefined
+        frame.content === undefined
           ? null
           : renderSlot(
             'frames.body',
             { rect: frame.rect, viewport: viewport(), focused: frame.id === view.active },
-            { entryKey: frame.tabs[0].typeId },
-          ) ?? frame.tabs[0].title),
+            { entryKey: frame.content.typeId },
+          ) ?? frame.content.title),
       // The resize handle is the south-east corner, the one a window grows from.
       frame.rectHonoured
         ? createElement('div', {

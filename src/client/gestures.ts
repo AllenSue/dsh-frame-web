@@ -11,13 +11,17 @@
  * Everything here is a pure function of numbers, so the entire gesture surface
  * is asserted without a DOM. During a drag the layer keeps its own preview and
  * calls none of this until the pointer is released.
+ *
+ * It is the *frame* that is dragged, never a tab. A shell that shows one content
+ * per frame has no chip to pick up, so the pointer names a divider or a floating
+ * frame and nothing else — moving a content between frames is a service call
+ * (`showContent`), which a plugin's own tab strip makes as readily as the shell
+ * could.
  */
 import type {
-  DropTarget, FocusDirection, NormalizedRect, PaneId, SplitId, TabId,
+  FocusDirection, NormalizedRect, PaneId, SplitId,
 } from '../../../frames/src/index.ts'
-import {
-  clampFloatRect, clampSizes, DOCK_EDGE_FRACTION, zoneAt,
-} from '../../../frames/src/index.ts'
+import { clampFloatRect, clampSizes } from '../../../frames/src/index.ts'
 import type { Chord } from './keys.ts'
 
 // The chord vocabulary belongs to the key layer; re-exported here because a
@@ -47,38 +51,20 @@ export interface GestureDivider {
   readonly parent: NormalizedRect
 }
 
-/** What the layer needs to know about the tree to name what a gesture acts on. */
+/**
+ * What the layer needs to know about the tree to name what a gesture acts on.
+ *
+ * Deliberately small, and it shrank when the tab strip went: there is no focused
+ * chip to drag and no pane list to drop onto, so what is left is the focused
+ * frame and the preset catalog.
+ */
 export interface GestureContext {
   /** The focused pane; a chord acts on it. */
   readonly activePaneId: PaneId | undefined
-  /** The focused pane's active chip; a chord drags it. */
-  readonly activeTabId: TabId | undefined
-  /** The type that backfills a pane a gesture would otherwise empty. */
-  readonly seed: string
-  /** The docked panes as drawn. */
-  readonly panes: readonly GesturePane[]
   /** Preset names the medium holds, in name order. */
   readonly presets: readonly string[]
   /** The preset in force, when the layout came from one. */
   readonly activePreset: string | undefined
-  /** Contents the shell holds, whether or not a frame is showing one. */
-  readonly contents: readonly GestureContent[]
-  /** Registered types, in registration order; a picker lists the instantiable ones. */
-  readonly types: readonly GestureType[]
-}
-
-/** A content, as a switch would name it. */
-export interface GestureContent {
-  readonly id: string
-  readonly kind: string
-  readonly title: string
-}
-
-/** A registered type, as a picker lists it. */
-export interface GestureType {
-  readonly id: string
-  readonly title: string
-  readonly instantiable: boolean
 }
 
 /**
@@ -100,10 +86,7 @@ export type FrameGesture =
     readonly paneId: PaneId
     readonly axis: 'row' | 'column'
   }
-  /** Release a dragged chip: what the pointer does instead. */
-  | { readonly kind: 'drop'; readonly tabId: TabId; readonly target: DropTarget; readonly seed: string }
-  /** Move a chip to another caret slot in a strip. */
-  | { readonly kind: 'placeTab'; readonly tabId: TabId; readonly paneId: PaneId; readonly index: number }
+  /** Close the frame: its content is put down, not destroyed. */
   | { readonly kind: 'close'; readonly paneId: PaneId }
   | { readonly kind: 'float'; readonly paneId: PaneId }
   | { readonly kind: 'dock'; readonly paneId: PaneId }
@@ -213,100 +196,6 @@ export function chordGesture(chord: Chord, context: GestureContext): FrameGestur
   }
 }
 
-/** Whether a point falls inside a rectangle, edges included at the near side. */
-export function contains(rect: NormalizedRect, point: Point): boolean {
-  return point.x >= rect.x && point.x < rect.x + rect.width
-    && point.y >= rect.y && point.y < rect.y + rect.height
-}
-
-/**
- * Which pane and region a pointer released over.
- *
- * The edge bands are the engine's own, so a release that the preview drew as a
- * split is the release the model carries out.
- * @param panes - the docked panes as drawn.
- * @param point - where the pointer is, in fractions of the drawable area.
- * @param band - edge band width as a share of a pane; defaults to the kit's.
- * @returns the dock target, or `undefined` when the pointer is over no pane —
- *   which is what "take it out into a window" means.
- */
-export function dropTargetAt(
-  panes: readonly GesturePane[],
-  point: Point,
-  band: number = DOCK_EDGE_FRACTION,
-): DropTarget | undefined {
-  const pane = panes.find((candidate) => contains(candidate.rect, point))
-  if (pane === undefined) return undefined
-  // A release exactly on the far edge of the last pane is inside the whole area
-  // but one unit outside that pane's own frame; pinning the share keeps `zoneAt`
-  // on its own domain.
-  const u = Math.min(1, Math.max(0, (point.x - pane.rect.x) / pane.rect.width))
-  const v = Math.min(1, Math.max(0, (point.y - pane.rect.y) / pane.rect.height))
-  return { kind: 'dock', paneId: pane.id, zone: zoneAt(u, v, band) }
-}
-
-/** A drag in progress. It holds no tree state and is thrown away on release. */
-export interface DragSession {
-  readonly tabId: TabId
-  readonly fromPaneId: PaneId
-}
-
-/**
- * The gesture a release produces.
- *
- * This is the only place a drag becomes an operation, and it runs once, on
- * release: every intermediate pointer position is a preview and nothing else.
- * @param session - the chip being dragged.
- * @param point - where the pointer let go.
- * @param context - the drawn panes and the seeding type.
- * @returns the release gesture; over nothing, the chip becomes a window.
- */
-export function releaseGesture(
-  session: DragSession,
-  point: Point,
-  context: GestureContext,
-): FrameGesture {
-  return {
-    kind: 'drop',
-    tabId: session.tabId,
-    target: dropTargetAt(context.panes, point) ?? { kind: 'float' },
-    seed: context.seed,
-  }
-}
-
-/**
- * The area a release would hand the dragged frame, for the preview to draw.
- *
- * The preview is computed from the same rule the drop uses, so what is drawn is
- * what happens. A release over nothing has no docked area to draw.
- * @param target - the release target.
- * @param panes - the docked panes as drawn.
- * @returns the rectangle the frame would fill, or `undefined` over nothing.
- */
-export function dropPreview(
-  target: DropTarget,
-  panes: readonly GesturePane[],
-): NormalizedRect | undefined {
-  if (target.kind === 'float') return undefined
-  const pane = panes.find((candidate) => candidate.id === target.paneId)
-  if (pane === undefined) return undefined
-  const { rect } = pane
-  const half = (side: 'left' | 'top'): NormalizedRect => (side === 'left'
-    ? { x: rect.x, y: rect.y, width: rect.width / 2, height: rect.height }
-    : { x: rect.x, y: rect.y, width: rect.width, height: rect.height / 2 })
-  const farHalf = (side: 'right' | 'bottom'): NormalizedRect => (side === 'right'
-    ? { x: rect.x + rect.width / 2, y: rect.y, width: rect.width / 2, height: rect.height }
-    : { x: rect.x, y: rect.y + rect.height / 2, width: rect.width, height: rect.height / 2 })
-  switch (target.zone) {
-    case 'center': return rect
-    case 'left': return half('left')
-    case 'top': return half('top')
-    case 'right': return farHalf('right')
-    case 'bottom': return farHalf('bottom')
-    default: return undefined
-  }
-}
-
 /**
  * Pointer movement along a divider's axis, as a fraction of the split.
  *
@@ -396,17 +285,4 @@ export function resizedFloatRect(
     width: size.width,
     height: size.height,
   })
-}
-
-/**
- * Which caret slot a pointer sits at in a strip of `count` chips.
- * @param local - pointer x as a fraction of the strip's own width.
- * @param chip - one chip's width as a fraction of that same strip.
- * @param count - chips currently in the strip.
- * @returns the caret slot, counted over the chips as drawn.
- */
-export function caretIndex(local: number, chip: number, count: number): number {
-  if (chip <= 0) return count
-  const slot = Math.round(local / chip)
-  return Math.min(Math.max(0, slot), count)
 }
