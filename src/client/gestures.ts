@@ -126,6 +126,18 @@ export type FrameGesture =
   | { readonly kind: 'savePresetAs' }
   /** Show an existing content in a pane. */
   | { readonly kind: 'showContent'; readonly paneId: PaneId; readonly contentId: string }
+  /**
+   * Show a content wherever it goes: the frame already displaying it, or a new
+   * one beside the current frame.
+   *
+   * This is the `C-x b` meaning, and the difference from `showContent` is the
+   * whole point of it. A pane holds one kind of content (§R5), so "show this in
+   * *that* pane" is a question the tree is allowed to refuse — and in a shell
+   * whose centre holds the conversation, it refuses every other content there
+   * is. `switch-to-buffer` does not ask that question: it shows the thing, and
+   * the tree decides where.
+   */
+  | { readonly kind: 'openContent'; readonly contentId: string }
   /** Make one new instance of a type and show it in a pane. */
   | { readonly kind: 'createContent'; readonly typeId: string; readonly paneId: PaneId }
   /**

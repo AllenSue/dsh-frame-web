@@ -32,6 +32,7 @@ import type { PickerChoice, PickerState } from './picker.ts'
 import { createPresetPort } from './presets.ts'
 import type { PresetStorage } from './presets.ts'
 import { execute } from './execute.ts'
+import type { Executed } from './execute.ts'
 
 /** Services this plugin needs before it activates. */
 export const inject = ['slots']
@@ -185,9 +186,19 @@ function createController(service: FramesService) {
     remeasure(): void {
       service.reportMeasurements({ viewport: viewport() })
     },
-    /** Run exactly one gesture. One gesture, one call, one history entry. */
-    dispatch(gesture: FrameGesture): void {
-      execute(service, gesture)
+    /**
+     * Run exactly one gesture. One gesture, one call, one history entry.
+     *
+     * A refused operation changes nothing, which is the core's oldest rule — and
+     * a user looking at a screen that did not change learns nothing from a
+     * console they are not reading. So the refusal's own words go back to the
+     * caller, which is the only side that can put them in front of someone.
+     * @param gesture - the semantic operation the user asked for.
+     * @param onRefused - told the refusal, when there is one.
+     * @returns whether the model accepted it.
+     */
+    run(gesture: FrameGesture, onRefused: (message: string) => void): Executed {
+      return execute(service, gesture, onRefused)
     },
   }
 }
@@ -210,7 +221,7 @@ function createController(service: FramesService) {
 function createPicker(
   view: Snapshot['view'],
   paneId: PaneId,
-  controller: ReturnType<typeof createController>,
+  onPick: (gesture: FrameGesture) => void,
 ): unknown {
   const choices = pickerChoices(view)
   if (choices.length === 0) {
@@ -221,7 +232,7 @@ function createPicker(
 
   const row = (choice: PickerChoice): unknown => createElement('div', {
     key: `${choice.group}:${choice.id}`,
-    onClick: () => { controller.dispatch(choiceGesture(choice, paneId)) },
+    onClick: () => { onPick(choiceGesture(choice, paneId)) },
     style: {
       cursor: 'pointer',
       padding: '4px 8px',
@@ -436,6 +447,22 @@ function createLayer(controller: ReturnType<typeof createController>) {
     const [picker, setPicker] = useState<PickerState | undefined>(undefined)
     const pickerOpen = useRef(false)
     pickerOpen.current = picker !== undefined
+    // Why the last thing that did nothing did nothing. A refused operation is
+    // never silent — the console is not where the user is looking.
+    const [notice, setNotice] = useState<string | undefined>(undefined)
+    /**
+     * Run one gesture, and say so on screen when the tree refuses it.
+     * @param gesture - the semantic operation to carry out.
+     */
+    const run = (gesture: FrameGesture): void => {
+      const outcome = controller.run(gesture, (message) => { setNotice(message) })
+      if (outcome === true) setNotice(undefined)
+    }
+    useEffect(() => {
+      if (notice === undefined) return
+      const timer = setTimeout(() => { setNotice(undefined) }, 6000)
+      return () => { clearTimeout(timer) }
+    }, [notice])
 
     useEffect(() => {
       const onMove = (event: PointerEvent): void => {
@@ -463,7 +490,7 @@ function createLayer(controller: ReturnType<typeof createController>) {
         if (running === undefined) return
         const point = at(event)
         if (running.kind === 'chip') {
-          controller.dispatch(releaseGesture(running.session, point, controller.context(running.seed)))
+          run(releaseGesture(running.session, point, controller.context(running.seed)))
           return
         }
         if (running.kind === 'divider') {
@@ -472,7 +499,7 @@ function createLayer(controller: ReturnType<typeof createController>) {
             x: event.clientX - running.from.x * extent.width,
             y: event.clientY - running.from.y * extent.height,
           }, extent)
-          controller.dispatch({
+          run({
             kind: 'resizeSplit',
             splitId: running.divider.splitId,
             sizes: dragSizes(running.divider, delta),
@@ -480,7 +507,7 @@ function createLayer(controller: ReturnType<typeof createController>) {
           return
         }
         const delta = { x: point.x - running.from.x, y: point.y - running.from.y }
-        controller.dispatch({
+        run({
           kind: 'placeFloat',
           paneId: running.paneId,
           rect: running.corner === undefined
@@ -528,7 +555,7 @@ function createLayer(controller: ReturnType<typeof createController>) {
         // name can only come from the user.
         if (gesture.kind === 'savePresetAs') {
           const name = askPresetName(controller.activePreset())
-          if (name !== undefined) controller.dispatch({ kind: 'savePreset', name })
+          if (name !== undefined) run({ kind: 'savePreset', name })
           return
         }
         // And the other: `C-x b` asks for a content or a type, and the answer is
@@ -540,7 +567,7 @@ function createLayer(controller: ReturnType<typeof createController>) {
           setPicker({ paneId, query: '', index: 0 })
           return
         }
-        controller.dispatch(gesture)
+        run(gesture)
       }
 
       const onResize = (): void => { controller.remeasure() }
@@ -581,7 +608,7 @@ function createLayer(controller: ReturnType<typeof createController>) {
         key: 'strip',
         onPointerDown: (event: { stopPropagation(): void }) => {
           stop(event)
-          controller.dispatch({ kind: 'focusPane', paneId: pane.id })
+          run({ kind: 'focusPane', paneId: pane.id })
         },
         style: {
           display: 'flex',
@@ -596,7 +623,7 @@ function createLayer(controller: ReturnType<typeof createController>) {
         key: tab.id,
         onPointerDown: (event: { stopPropagation(): void }) => {
           stop(event)
-          controller.dispatch({ kind: 'focusPane', paneId: pane.id })
+          run({ kind: 'focusPane', paneId: pane.id })
           begin({
             kind: 'chip',
             session: { tabId: tab.id as TabId, fromPaneId: pane.id },
@@ -622,7 +649,7 @@ function createLayer(controller: ReturnType<typeof createController>) {
         // Focus follows a click anywhere in the frame, but the event is *not*
         // stopped: the body is another plugin's content, and swallowing its
         // pointer events would break every control inside it.
-        onPointerDown: () => { controller.dispatch({ kind: 'focusPane', paneId: pane.id }) },
+        onPointerDown: () => { run({ kind: 'focusPane', paneId: pane.id }) },
         style: {
           ...area(pane.rect),
           pointerEvents: 'auto',
@@ -646,7 +673,7 @@ function createLayer(controller: ReturnType<typeof createController>) {
         style: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' },
       },
       shown === undefined
-        ? createPicker(view, pane.id, controller)
+        ? createPicker(view, pane.id, run)
         : renderSlot(
           'frames.body',
           { rect: pane.rect, viewport: viewport(), focused: pane.id === view.active },
@@ -775,6 +802,28 @@ function createLayer(controller: ReturnType<typeof createController>) {
       key: 'overlay',
       style: { position: 'absolute', inset: '0', zIndex: 2, pointerEvents: 'none' },
     }, overlay),
+    // A refusal, in the user's field of view rather than in the console. It says
+    // what the tree said, because the tree's words are the only ones that know
+    // *why* nothing happened.
+    notice === undefined ? null : createElement('div', {
+      key: 'notice',
+      style: {
+        position: 'fixed',
+        top: '0',
+        left: '50%',
+        transform: 'translateX(-50%)',
+        zIndex: 55,
+        maxWidth: '90vw',
+        padding: '4px 10px',
+        background: '#3a2226',
+        border: '1px solid #a05252',
+        borderTop: 'none',
+        borderRadius: '0 0 6px 6px',
+        color: '#ffd9d9',
+        font: '12px/1.4 ui-monospace, monospace',
+        pointerEvents: 'none',
+      },
+    }, notice),
     createElement('div', { key: 'floats', style: { position: 'relative', width: '100%', height: '100%', pointerEvents: 'none' } }, floats),
     preview === undefined ? null : createElement('div', {
       key: 'preview',
@@ -797,7 +846,7 @@ function createLayer(controller: ReturnType<typeof createController>) {
       hover: (index) => { setPicker({ ...picker, index }) },
       choose: (choice) => {
         setPicker(undefined)
-        if (choice !== undefined) controller.dispatch(choiceGesture(choice, picker.paneId))
+        if (choice !== undefined) run(choiceGesture(choice, picker.paneId))
       },
       close: () => { setPicker(undefined) },
     }),

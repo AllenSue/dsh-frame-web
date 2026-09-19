@@ -85,9 +85,12 @@ test('a query that answers to nothing leaves nothing, rather than everything', (
 test('a row means what its group says it means', () => {
   const pane = 'pane9' as PickerState['paneId']
 
+  // Open *shows* the content: no pane is named, because a pane holds one kind
+  // and the tree is the side that decides where this one can be displayed. This
+  // is the difference from the frame's own picker, which says "show it here".
   assert.deepEqual(
     choiceGesture({ group: 'open', id: 'notes-7', title: 'Notes' }, pane),
-    { kind: 'showContent', paneId: pane, contentId: 'notes-7' },
+    { kind: 'openContent', contentId: 'notes-7' },
   )
   assert.deepEqual(
     choiceGesture({ group: 'new', id: 'editor', title: 'Editor' }, pane),

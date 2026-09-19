@@ -19,9 +19,20 @@ import type { FrameGesture } from './gestures.ts'
 /** Whether the model accepted a gesture, or a promise of that for the IO-backed ones. */
 export type Executed = boolean | Promise<boolean>
 
-/** Report a refusal; a gesture the model will not carry out is never silent. */
-function report(result: FrameResult<unknown>): void {
-  if (!result.ok) console.warn(`[frames] ${result.code}: ${result.message}`)
+/**
+ * Report a refusal; a gesture the model will not carry out is never silent.
+ *
+ * Silent is exactly what it was, and a user reported the symptom rather than the
+ * reason: choosing something from the picker did nothing, because the tree
+ * refused it (`frames/kind-mismatch`) and the refusal only ever reached the
+ * console. So the caller can hand in somewhere for it to be *seen*.
+ * @param result - what the model answered.
+ * @param onRefused - told the refusal's own words, when there is one.
+ */
+function report(result: FrameResult<unknown>, onRefused?: (message: string) => void): void {
+  if (result.ok) return
+  console.warn(`[frames] ${result.code}: ${result.message}`)
+  onRefused?.(`${result.code}: ${result.message}`)
 }
 
 /** Report a settled asynchronous intent, containing a medium that threw. */
@@ -41,9 +52,15 @@ function settle(work: Promise<FrameResult<unknown>>): Promise<boolean> {
  * Carry out one gesture.
  * @param service - the frame tree to change.
  * @param gesture - the semantic operation the user asked for.
+ * @param onRefused - told a refusal's own words, so a caller with somewhere to
+ *   show them does not leave the user with "nothing happened".
  * @returns whether the model accepted it.
  */
-export function execute(service: FramesService, gesture: FrameGesture): Executed {
+export function execute(
+  service: FramesService,
+  gesture: FrameGesture,
+  onRefused?: (message: string) => void,
+): Executed {
   let result: FrameResult<unknown>
   switch (gesture.kind) {
     case 'split':
@@ -90,15 +107,21 @@ export function execute(service: FramesService, gesture: FrameGesture): Executed
     case 'showContent':
       result = service.showContent(gesture.paneId, gesture.contentId)
       break
+    case 'openContent':
+      // No options: the core looks for a frame already showing it and focuses
+      // that one, or makes a new frame beside the current frame. A caller that
+      // needs it somewhere particular should say so with `showContent`.
+      result = service.openContent(gesture.contentId)
+      break
     case 'createContent':
       result = service.createContent(gesture.typeId, gesture.paneId)
       break
     case 'pickContent':
       // Likewise: the name comes from the user, so the renderer resolves this
-      // into `showContent` or `createContent` before dispatching.
+      // into `openContent` or `createContent` before dispatching.
       console.warn('[frames] a pick with no name reached execute; the renderer resolves it first')
       return false
   }
-  report(result)
+  report(result, onRefused)
   return result.ok
 }

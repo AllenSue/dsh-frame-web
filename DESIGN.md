@@ -106,7 +106,7 @@ classDiagram
         +seed() string
         +activePreset() string
         +remeasure() void
-        +dispatch(gesture) void
+        +run(gesture, onRefused) Executed
     }
     class Active {
         <<union>>
@@ -310,7 +310,7 @@ ctx.slots.register({
 | `keys.test.ts` | 输入框内触发、`C-x` 与剪切的冲突、未绑定的键不被吞、前导只活一次按键 |
 | `picker.test.ts` | 候选构成（不可实例化的类型不进列表）、空查询保留全部、四个匹配档位与排序、光标环绕且不越界、每行对应的手势 |
 | `presets.test.ts` | 命名空间、坏条目读作不存在、两个 port 互不干扰 |
-| `tools/client-bundle.test.ts` | 构件是 factory-CJS、只 require `react`、每个包只有一套 require 绑定、无重复声明、核心名齐全 |
+| `tools/client-bundle.test.ts` | 构件是 factory-CJS、只 require `react`、每个包只有一套 require 绑定、无重复声明、核心名齐全、**每个服务方法只有一个调用点** |
 | `tools/plugin-runtime.test.ts` | **在 vm 里真的跑构件**：装机、存一次、再装一次（模拟刷新）、把 body 的 owner props 抓出来断言、**断言 overlay 座位无论有没有 frame 都画一次** |
 
 > 最后两条的区别值得说：前者把构件当**文本**读，后者把构件当**代码**跑。这个项目踩过的坑里，真正伤人的是"构件能加载但一载入就抛"和"加载了却什么都没注册"——**两种都躲得过正则**。
@@ -326,8 +326,20 @@ ctx.slots.register({
 | 行从哪来 | `pickerChoices(view)`：投影的 `contents` + 可实例化的 `types` | 渲染端不认识内容，只认识投影；核心因此不需要为这个 UI 加任何东西 |
 | 查询怎么排 | `matchChoices(choices, query)`：id/标题**完全相同** → 前缀 → 子串 → 子序列 | 人打 `dpr` 是想找 `document-preview`，打 `doc` 是想让文档预览排第一；同档保持列表原序，列表不会在光标下重排 |
 | 光标怎么动 | `pickerKey(state, choices, key)`：↑↓ 环绕，且始终被夹在**过滤后**的列表里 | 过滤让列表变短时，光标不能留在末尾之外 |
-| 选一行做什么 | `choiceGesture(choice, paneId)`：`open` 组 → `showContent`；`new` 组 → `createContent` | 组就是含义，不需要猜"这个名字是已经有的还是要新造的" |
+| 选一行做什么 | `choiceGesture(choice, paneId)`：`open` 组 → **`openContent`**；`new` 组 → `createContent` | `open` 是 `switch-to-buffer`：**显示它**，由核心决定落在哪一格（已在显示就聚焦那一格，否则在当前 frame 旁开一格）。`showContent`（"就显示在**这一格**"）是一 pane 一 kind 的规则允许被拒的问题——而中心那格已经装着会话时，它对其它任何内容都会拒。`new` 要指名 pane，因为造出来的东西总得有个落点，而用户当时所在的 frame 就是他要的答案 |
 
 **它是模态的，而且这是刻意的。** 别处的规则是"输入框里也能用快捷键"（§2.2），因为那是为了不让人把手从键盘挪开；而这个对话框**本身就是**一次快捷键的收尾，所以它开着的期间每一次按键都属于查询：全局键层让位，对话框只留 ↑↓ / Enter / Esc（Esc 也由全局那一层兜住，因为点一下行会把焦点移出输入框）。
 
-空 frame 里那版选择器（§4/`createPicker`）用的是同一批行与同一个 `choiceGesture`，区别只是没有地方打字。
+空 frame 里那版选择器（§4/`createPicker`）用的是同一批行与同一个 `choiceGesture` 的**另一面**：它在那格里说"就显示在这儿"（`showContent`）——空 pane 接得住任何 kind，所以那句话在那里不会被拒。两个入口的区别是"显示它"与"显示在这儿"，各自诚实。
+
+### 7.1 被拒绝的操作必须看得见
+
+**这一条是用户报出来的，不是设计出来的。** 选择器一开始把每一行都映射成 `showContent(当前 pane, …)`，于是：中心那格装着会话时，选"会话"是聚焦已有的标签（画面不变），选别的内容被 `frames/kind-mismatch` 拒绝（画面也不变）——两次都**只有控制台里一行 `console.warn`**，用户看到的是"选了没用"。
+
+现在：
+
+- **每一次 dispatch 都经 `run()`**（`controller.run(gesture, onRefused)` → `execute(service, gesture, onRefused)`），拒绝时把核心的原话交给界面；
+- 界面把它显示成顶部一条红色提示（6 秒后自己消失），因为**核心拒绝的理由只有核心知道**（`frames/kind-mismatch` / `frames/pane-budget-exhausted` / `frames/too-narrow` …），编一句人话只会把真相磨掉；
+- 打字与原话都保留：`console.warn` 照旧，方便排查。
+
+> 这条与终端契约里那句是同一件事："被拒绝的调用返回 `{ ok: false, code, message }` 且不改状态——把它显示出来即可。" 渲染端此前只做到了前半句。

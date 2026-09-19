@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import type { FramesService } from '../../frames/src/index.ts'
-import { ok } from '../../frames/src/index.ts'
+import { fail, ok } from '../../frames/src/index.ts'
 import {
   caretIndex, chordGesture, dividerDelta, draggedFloatRect, dragSizes, dropPreview, dropTargetAt,
   nextPreset, releaseGesture, resizedFloatRect,
@@ -72,6 +72,7 @@ function recorder(): { service: FramesService; calls: readonly unknown[][] } {
     savePreset: later('savePreset'),
     applyPreset: later('applyPreset'),
     showContent: note('showContent'),
+    openContent: note('openContent'),
     createContent: note('createContent'),
     paneKind: () => undefined,
   } as unknown as FramesService
@@ -317,6 +318,8 @@ test('one gesture is one call on the frame service', async () => {
     [{ kind: 'applyPreset', name: 'work' }, ['applyPreset', 'work']],
     [{ kind: 'showContent', paneId: 'pane-1' as never, contentId: 'file-a' },
       ['showContent', 'pane-1', 'file-a']],
+    // `C-x b`'s answer: shown wherever it goes, so no pane is named.
+    [{ kind: 'openContent', contentId: 'file-a' }, ['openContent', 'file-a']],
     [{ kind: 'createContent', typeId: 'editor', paneId: 'pane-1' as never },
       ['createContent', 'editor', 'pane-1']],
   ]
@@ -326,6 +329,25 @@ test('one gesture is one call on the frame service', async () => {
     assert.equal(await Promise.resolve(execute(service, gesture)), true)
     assert.deepEqual(calls, [expected], `${gesture.kind} should make exactly one call`)
   }
+})
+
+test('a refusal is handed to whoever can put it in front of the user', () => {
+  // It used to reach the console and nowhere else, which is how "choosing a row
+  // does nothing" became a bug report instead of a message on the screen.
+  const { service } = recorder()
+  const refusing = {
+    ...service,
+    openContent: () => fail('frames/kind-mismatch', 'that pane holds another kind of content'),
+  } as unknown as FramesService
+  const seen: string[] = []
+
+  assert.equal(execute(refusing, { kind: 'openContent', contentId: 'file-a' }, (message) => { seen.push(message) }), false)
+  assert.deepEqual(seen, ['frames/kind-mismatch: that pane holds another kind of content'])
+
+  // An accepted gesture says nothing: there is nothing to explain.
+  const accepted: string[] = []
+  assert.equal(execute(service, { kind: 'openContent', contentId: 'file-a' }, (message) => { accepted.push(message) }), true)
+  assert.deepEqual(accepted, [])
 })
 
 test('a save with no name never reaches the model under a guessed one', () => {
