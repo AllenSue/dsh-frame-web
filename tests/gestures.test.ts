@@ -5,7 +5,7 @@ import type { FramesService } from '../../frames/src/index.ts'
 import { ok } from '../../frames/src/index.ts'
 import {
   caretIndex, chordGesture, dividerDelta, draggedFloatRect, dragSizes, dropPreview, dropTargetAt,
-  nextPreset, pickContent, releaseGesture, resizedFloatRect,
+  nextPreset, releaseGesture, resizedFloatRect,
 } from '../src/client/gestures.ts'
 import type { Chord, FrameGesture, GestureContext, GesturePane } from '../src/client/gestures.ts'
 import { execute } from '../src/client/execute.ts'
@@ -279,45 +279,11 @@ test('the preset chords name what they act on, and refuse when there is nothing 
   assert.equal(chordGesture('C-x s', CONTEXT), undefined)
 })
 
-test('a typed name resolves to showing a content or making one', () => {
-  const pane = PANES[1]!.id
-
-  // An exact content id shows that content.
-  assert.deepEqual(pickContent('file-a', CONTEXT, pane), { kind: 'showContent', paneId: pane, contentId: 'file-a' })
-  // A title does too, case-insensitively.
-  assert.deepEqual(pickContent('B.TS', CONTEXT, pane), { kind: 'showContent', paneId: pane, contentId: 'file-b' })
-  // A type id makes a new one.
-  assert.deepEqual(pickContent('editor', CONTEXT, pane), { kind: 'createContent', paneId: pane, typeId: 'editor' })
-  // And a type's title.
-  assert.deepEqual(pickContent('  Editor  ', CONTEXT, pane), { kind: 'createContent', paneId: pane, typeId: 'editor' })
-})
-
-test('a name that answers to nothing resolves to nothing, rather than guessing', () => {
-  const pane = PANES[1]!.id
-
-  assert.equal(pickContent('', CONTEXT, pane), undefined)
-  assert.equal(pickContent('   ', CONTEXT, pane), undefined)
-  assert.equal(pickContent('no-such-thing', CONTEXT, pane), undefined)
-  // A type that cannot be instantiated is not an answer.
-  assert.equal(pickContent('conversation', CONTEXT, pane), undefined)
-})
-
-test('an exact id wins over a title that happens to match another', () => {
-  const pane = PANES[1]!.id
-  const tangled: GestureContext = {
-    ...CONTEXT,
-    // A content whose id is `b.ts` while another content's title is `b.ts`.
-    contents: [
-      { id: 'a.ts', kind: 'editor', title: 'b.ts' },
-      { id: 'b.ts', kind: 'editor', title: 'c.ts' },
-    ],
-  }
-
-  assert.deepEqual(
-    pickContent('b.ts', tangled, pane),
-    { kind: 'showContent', paneId: pane, contentId: 'b.ts' },
-    'the id is the address; a title is only a convenience',
-  )
+test('the content chord asks, and the asking is the picker\u2019s business', () => {
+  // What the chord produces is the *ask*: resolving it is the renderer's, and
+  // `picker.test.ts` owns the list and its query. Nothing here may turn it into
+  // an operation — `execute` has to keep seeing it as unfinished.
+  assert.deepEqual(chordGesture('C-x b', CONTEXT), { kind: 'pickContent' })
 })
 
 test('a pick with no name never reaches the model', () => {

@@ -26,8 +26,9 @@ import {
 } from './gestures.ts'
 import type { DragSession, FrameGesture, GestureContext, GestureDivider, Point } from './gestures.ts'
 import { decideKey, hasSelection, isEditing } from './keys.ts'
-import { pickContent } from './gestures.ts'
 import type { TypingTarget } from './keys.ts'
+import { choiceGesture, matchChoices, pickerChoices, pickerKey } from './picker.ts'
+import type { PickerChoice, PickerState } from './picker.ts'
 import { createPresetPort } from './presets.ts'
 import type { PresetStorage } from './presets.ts'
 import { execute } from './execute.ts'
@@ -72,26 +73,6 @@ function askPresetName(suggested: string | undefined): string | undefined {
   if (answer === null) return undefined
   const name = answer.trim()
   return name === '' ? undefined : name
-}
-
-/**
- * Ask which content to bring up.
- *
- * The console is told what there is, so the answer can be a name rather than a
- * memorised id, and the same box serves both cases: naming something already
- * made shows it, naming a type makes another one.
- * @param context - what the shell holds and which types it can make.
- * @returns what the user typed, or an empty string when they cancelled.
- */
-function askContentName(context: GestureContext): string {
-  const held = context.contents.map((content) => content.title)
-  const makeable = context.types.filter((type) => type.instantiable).map((type) => type.title)
-  const hint = [
-    held.length === 0 ? '' : `open: ${held.join(', ')}`,
-    makeable.length === 0 ? '' : `new: ${makeable.join(', ')}`,
-  ].filter((part) => part !== '').join('\n')
-  const answer = prompt(`Show content\n${hint}`, '')
-  return answer ?? ''
 }
 
 /** The projection the layer draws. */
@@ -218,6 +199,9 @@ function createController(service: FramesService) {
  * holds — a content with no frame on it is still alive, and this is where it
  * comes back. **New** is what can be made. The renderer decides nothing about
  * either: both come from the projection, which is what the core was told.
+ *
+ * The same rows feed the `C-x b` dialog below; this is the version with nowhere
+ * to type, drawn in the frame that has nothing in it.
  * @param view - the projection, for the contents and the registered types.
  * @param paneId - the frame the choice is for.
  * @param controller - the one way a gesture becomes a change.
@@ -228,16 +212,16 @@ function createPicker(
   paneId: PaneId,
   controller: ReturnType<typeof createController>,
 ): unknown {
-  const makeable = view.types.filter((type) => type.instantiable)
-  if (view.contents.length === 0 && makeable.length === 0) {
+  const choices = pickerChoices(view)
+  if (choices.length === 0) {
     return createElement('div', {
       style: { padding: '12px', color: '#98a1b0' },
     }, 'Nothing to show: no plugin has registered a content or a type.')
   }
 
-  const row = (key: string, label: string, onPick: () => void): unknown => createElement('div', {
-    key,
-    onClick: onPick,
+  const row = (choice: PickerChoice): unknown => createElement('div', {
+    key: `${choice.group}:${choice.id}`,
+    onClick: () => { controller.dispatch(choiceGesture(choice, paneId)) },
     style: {
       cursor: 'pointer',
       padding: '4px 8px',
@@ -247,28 +231,182 @@ function createPicker(
       textOverflow: 'ellipsis',
       whiteSpace: 'nowrap',
     },
-  }, label)
+  }, choice.title)
 
-  const section = (title: string, entries: readonly unknown[]): unknown =>
-    entries.length === 0
+  const section = (title: string, group: PickerChoice['group']): unknown => {
+    const entries = choices.filter((choice) => choice.group === group)
+    return entries.length === 0
       ? null
       : createElement('div', { key: title, style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
         createElement('div', { key: 'h', style: { color: '#98a1b0' } }, title),
-        entries)
+        entries.map(row))
+  }
 
   return createElement('div', {
     style: { padding: '12px', display: 'flex', flexDirection: 'column', gap: '12px', overflow: 'auto' },
   },
-  section('Open', view.contents.map((content) => row(
-    `open:${content.id}`,
-    content.title,
-    () => { controller.dispatch({ kind: 'showContent', paneId, contentId: content.id }) },
-  ))),
-  section('New', makeable.map((type) => row(
-    `new:${type.id}`,
-    type.title,
-    () => { controller.dispatch({ kind: 'createContent', typeId: type.id, paneId }) },
-  ))))
+  section('Open', 'open'),
+  section('New', 'new'))
+}
+
+/** What the `C-x b` dialog needs to run itself. */
+interface PickerDialogProps {
+  readonly state: PickerState
+  readonly choices: readonly PickerChoice[]
+  /** A new query, cursor back at the top of what it leaves. */
+  setQuery(query: string): void
+  /** Move the cursor, wrapping at both ends. */
+  move(key: 'up' | 'down'): void
+  /** Put the cursor on one row — what a pointer hovering it means. */
+  hover(index: number): void
+  /** Take a row, or close when there is none. */
+  choose(choice: PickerChoice | undefined): void
+  close(): void
+}
+
+/**
+ * The `C-x b` dialog.
+ *
+ * A query box over the list it filters, because the alternative — a browser
+ * `prompt` — asks a person to remember a name and type it exactly. The list is
+ * the answer to "what is there", and the query is how it is narrowed.
+ *
+ * It is a modal on purpose. Chords otherwise work everywhere, typing fields
+ * included; here every keystroke belongs to the query, so the key layer stands
+ * down while this is open and the box keeps only what it needs: arrows, Enter,
+ * and Escape.
+ * @param props - the query, the rows it leaves, and what the keys do.
+ * @returns the dialog.
+ */
+function createPickerDialog({
+  state, choices, setQuery, move, hover, choose, close,
+}: PickerDialogProps): unknown {
+  const chosen = choices[state.index]
+  const stop = (event: { stopPropagation(): void }): void => { event.stopPropagation() }
+
+  const onKeyDown = (event: {
+    readonly key: string
+    readonly shiftKey: boolean
+    preventDefault(): void
+  }): void => {
+    if (event.key === 'ArrowDown' || (event.key === 'Tab' && !event.shiftKey)) {
+      event.preventDefault()
+      move('down')
+      return
+    }
+    if (event.key === 'ArrowUp' || (event.key === 'Tab' && event.shiftKey)) {
+      event.preventDefault()
+      move('up')
+      return
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      choose(chosen)
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      close()
+    }
+  }
+
+  const row = (choice: PickerChoice, index: number): unknown => {
+    const on = index === state.index
+    return createElement('div', {
+      key: `${choice.group}:${choice.id}`,
+      onPointerEnter: () => { hover(index) },
+      onClick: () => { choose(choice) },
+      style: {
+        cursor: 'pointer',
+        padding: '6px 10px',
+        borderRadius: '4px',
+        background: on ? '#2b3442' : 'transparent',
+        color: on ? '#e6e9ef' : '#c3c9d4',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      },
+    }, choice.title)
+  }
+
+  const section = (title: string, group: PickerChoice['group']): unknown => {
+    const entries = choices
+      .map((choice, index) => ({ choice, index }))
+      .filter((entry) => entry.choice.group === group)
+    return entries.length === 0
+      ? null
+      : createElement('div', { key: title, style: { display: 'flex', flexDirection: 'column', gap: '2px' } },
+        createElement('div', {
+          key: 'h',
+          style: { padding: '6px 10px 2px', color: '#98a1b0', fontSize: '11px', textTransform: 'uppercase' },
+        }, title),
+        entries.map((entry) => row(entry.choice, entry.index)))
+  }
+
+  return createElement('div', {
+    key: 'picker',
+    onPointerDown: close,
+    style: {
+      position: 'fixed',
+      inset: '0',
+      zIndex: 60,
+      display: 'flex',
+      alignItems: 'flex-start',
+      justifyContent: 'center',
+      background: 'rgba(10, 12, 16, .55)',
+      pointerEvents: 'auto',
+    },
+  },
+  createElement('div', {
+    key: 'panel',
+    onPointerDown: stop,
+    style: {
+      marginTop: '12vh',
+      width: 'min(560px, 90vw)',
+      maxHeight: '60vh',
+      display: 'flex',
+      flexDirection: 'column',
+      background: '#1b1f26',
+      border: '1px solid #4a5364',
+      borderRadius: '8px',
+      boxShadow: '0 12px 32px rgba(0,0,0,.5)',
+      overflow: 'hidden',
+    },
+  },
+  createElement('input', {
+    key: 'query',
+    autoFocus: true,
+    value: state.query,
+    placeholder: 'Show content…',
+    spellCheck: false,
+    onChange: (event: { target: { value: string } }) => { setQuery(event.target.value) },
+    onKeyDown,
+    style: {
+      flex: '0 0 auto',
+      padding: '10px 12px',
+      background: 'transparent',
+      border: 'none',
+      borderBottom: '1px solid #39404c',
+      color: '#e6e9ef',
+      font: 'inherit',
+      outline: 'none',
+    },
+  }),
+  createElement('div', {
+    key: 'list',
+    style: { flex: '1 1 auto', minHeight: '0', overflowY: 'auto', padding: '4px' },
+  },
+  choices.length === 0
+    ? createElement('div', { key: 'empty', style: { padding: '10px 12px', color: '#98a1b0' } },
+      state.query.trim() === ''
+        ? 'Nothing to show: no plugin has registered a content or a type.'
+        : `Nothing matches “${state.query.trim()}”.`)
+    : [section('Open', 'open'), section('New', 'new')]),
+  createElement('div', {
+    key: 'hint',
+    style: { flex: '0 0 auto', padding: '6px 12px', borderTop: '1px solid #39404c', color: '#98a1b0', fontSize: '11px' },
+  }, '↑↓ move · Enter open · Esc close'),
+  ))
 }
 
 /**
@@ -291,6 +429,13 @@ function createLayer(controller: ReturnType<typeof createController>) {
     const [preview, setPreview] = useState<NormalizedRect | undefined>(undefined)
     const active = useRef<Active | undefined>(undefined)
     const armed = useRef(false)
+    // The `C-x b` picker lives here for the same reason: what a person is in the
+    // middle of choosing is not part of any layout. The key listener is installed
+    // once, so it reads whether the picker is open through a ref — a closure over
+    // the state would stay on the first render's `undefined` forever.
+    const [picker, setPicker] = useState<PickerState | undefined>(undefined)
+    const pickerOpen = useRef(false)
+    pickerOpen.current = picker !== undefined
 
     useEffect(() => {
       const onMove = (event: PointerEvent): void => {
@@ -345,6 +490,17 @@ function createLayer(controller: ReturnType<typeof createController>) {
       }
 
       const onKey = (event: KeyboardEvent): void => {
+        // The picker is modal: every keystroke belongs to its query box, so the
+        // chords stand down while it is open. Escape still closes it here rather
+        // than only in the box, because a click on a row can take the focus out
+        // of that box.
+        if (pickerOpen.current) {
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            setPicker(undefined)
+          }
+          return
+        }
         // A frame takes its chords wherever the user is, a text field included:
         // the whole point is to split or float without reaching for the mouse.
         // The one thing a field keeps is a key already working there, which
@@ -368,21 +524,20 @@ function createLayer(controller: ReturnType<typeof createController>) {
         const gesture = chordGesture(decision.chord, controller.context(controller.seed()))
         if (gesture === undefined) return
         event.preventDefault()
-        // The one gesture the UI has to finish: `C-x C-s` names a preset, and a
+        // One gesture the UI has to finish: `C-x C-s` names a preset, and a new
         // name can only come from the user.
         if (gesture.kind === 'savePresetAs') {
           const name = askPresetName(controller.activePreset())
           if (name !== undefined) controller.dispatch({ kind: 'savePreset', name })
           return
         }
-        // And the other: `C-x b` names a content or a type, and a person should
-        // not have to say which of the two they mean.
+        // And the other: `C-x b` asks for a content or a type, and the answer is
+        // a choice — so it opens the picker over the pane that had focus, and the
+        // choice itself becomes the gesture.
         if (gesture.kind === 'pickContent') {
-          const context = controller.context(controller.seed())
-          const paneId = context.activePaneId
+          const paneId = controller.context(controller.seed()).activePaneId
           if (paneId === undefined) return
-          const resolved = pickContent(askContentName(context), context, paneId)
-          if (resolved !== undefined) controller.dispatch(resolved)
+          setPicker({ paneId, query: '', index: 0 })
           return
         }
         controller.dispatch(gesture)
@@ -407,6 +562,16 @@ function createLayer(controller: ReturnType<typeof createController>) {
     const stop = (event: { stopPropagation(): void }): void => { event.stopPropagation() }
 
     const { view } = snapshot
+
+    // What the `C-x b` dialog is showing: the rows the projection offers, cut
+    // down by the query. Computed from the live view rather than captured when
+    // the dialog opened, so a content a plugin registers while it is up is
+    // offered too.
+    const choices = picker === undefined ? [] : matchChoices(pickerChoices(view), picker.query)
+
+    // The overlay seat is drawn whether or not any frame exists; it is what a
+    // content that nothing is displaying hangs on.
+    const overlay = renderSlot('frames.overlay', {})
 
     const frames = view.docked.map((pane) => {
       const shown = pane.tabs.find((tab) => tab.active) ?? pane.tabs[0]
@@ -609,7 +774,7 @@ function createLayer(controller: ReturnType<typeof createController>) {
     createElement('div', {
       key: 'overlay',
       style: { position: 'absolute', inset: '0', zIndex: 2, pointerEvents: 'none' },
-    }, renderSlot('frames.overlay', {})),
+    }, overlay),
     createElement('div', { key: 'floats', style: { position: 'relative', width: '100%', height: '100%', pointerEvents: 'none' } }, floats),
     preview === undefined ? null : createElement('div', {
       key: 'preview',
@@ -621,6 +786,20 @@ function createLayer(controller: ReturnType<typeof createController>) {
         borderRadius: '6px',
         zIndex: 50,
       },
+    }),
+    // The `C-x b` dialog, drawn above everything the layer owns: while it is open
+    // it is the only thing taking input, so it has to be the topmost thing drawn.
+    picker === undefined ? null : createPickerDialog({
+      state: picker,
+      choices,
+      setQuery: (query) => { setPicker({ ...picker, query, index: 0 }) },
+      move: (key) => { setPicker(pickerKey(picker, choices, key)) },
+      hover: (index) => { setPicker({ ...picker, index }) },
+      choose: (choice) => {
+        setPicker(undefined)
+        if (choice !== undefined) controller.dispatch(choiceGesture(choice, picker.paneId))
+      },
+      close: () => { setPicker(undefined) },
     }),
     )
   }

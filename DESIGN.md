@@ -30,6 +30,7 @@ flowchart TB
     subgraph lang["手势语言 —— 纯函数，脱开 DOM 可测"]
         GES["client/gestures.ts<br/>区域判定 · 夹取 · 归约成 FrameGesture"]
         KEY["client/keys.ts<br/>decideKey：这一次按键算谁的"]
+        PIC["client/picker.ts<br/>候选行 · 查询排序 · 选中行"]
     end
 
     subgraph io["出口与介质"]
@@ -41,16 +42,18 @@ flowchart TB
 
     IDX --> GES
     IDX --> KEY
+    IDX --> PIC
     IDX --> EXE
     IDX --> PRE
     GES --> CORE
     KEY --> GES : Chord
+    PIC --> GES : FrameGesture
     EXE --> CORE
     PRE --> CORE
 
     classDef pureC fill:#1f3a2f,stroke:#5fbf7f,color:#e6e9ef
     classDef edgeC fill:#1f3a5f,stroke:#6ea8fe,color:#e6e9ef
-    class GES,KEY pureC
+    class GES,KEY,PIC pureC
     class EXE,PRE edgeC
 ```
 
@@ -217,6 +220,13 @@ classDiagram
         +chordGesture(chord, ctx) FrameGesture
         +nextPreset(presets, active) string
     }
+    class Picker {
+        <<module>>
+        +pickerChoices(source) PickerChoice[]
+        +matchChoices(choices, query) PickerChoice[]
+        +choiceGesture(choice, paneId) FrameGesture
+        +pickerKey(state, choices, key) PickerState
+    }
     class Keys {
         <<module>>
         +isEditing(target) boolean
@@ -235,12 +245,16 @@ classDiagram
     }
 
     Gestures ..> Execute : 产物交给它
+    Picker ..> Execute : 选中的行也是
     Execute ..> FrameGesture
 ```
 
 > **`execute` 的返回值是 `boolean | Promise<boolean>`**：预设那两条意图背后是 IO，所以它们答得晚。但它们仍然**只调一次**服务。
 >
-> **`savePresetAs` 是唯一未完成的手势**：只有 UI 能问名字，所以渲染端先解析成带名字的 `savePreset`，`execute` 永远不该看到它——看到就报告，而不是用一个没人选的名字存下去。
+> **两个手势要 UI 收尾，`execute` 永远不该看到它们**：
+>
+> - `savePresetAs`：只有 UI 能问名字，所以渲染端先解析成带名字的 `savePreset`——看到它就报告，而不是用一个没人选的名字存下去。它至今仍用浏览器 `prompt`（一个纯文本问题，没有可列举的答案）。
+> - `pickContent`：`C-x b` 要的是一个**选择**，所以渲染端打开 `client/picker.ts` 的对话框（列表 + 输入过滤），选中行本身成为 `showContent` / `createContent` 之一。它一度也是 `prompt`；见本节末尾。
 
 ---
 
@@ -294,8 +308,26 @@ ctx.slots.register({
 |---|---|
 | `gestures.test.ts` | 区域判定、夹取、归约、预览与释放用同一条规则、**一个手势一次调用** |
 | `keys.test.ts` | 输入框内触发、`C-x` 与剪切的冲突、未绑定的键不被吞、前导只活一次按键 |
+| `picker.test.ts` | 候选构成（不可实例化的类型不进列表）、空查询保留全部、四个匹配档位与排序、光标环绕且不越界、每行对应的手势 |
 | `presets.test.ts` | 命名空间、坏条目读作不存在、两个 port 互不干扰 |
-| `tools/client-bundle.test.ts` | 构件是 factory-CJS、只 require `react`、无重复声明、核心名齐全 |
+| `tools/client-bundle.test.ts` | 构件是 factory-CJS、只 require `react`、每个包只有一套 require 绑定、无重复声明、核心名齐全 |
 | `tools/plugin-runtime.test.ts` | **在 vm 里真的跑构件**：装机、存一次、再装一次（模拟刷新）、把 body 的 owner props 抓出来断言、**断言 overlay 座位无论有没有 frame 都画一次** |
 
 > 最后两条的区别值得说：前者把构件当**文本**读，后者把构件当**代码**跑。这个项目踩过的坑里，真正伤人的是"构件能加载但一载入就抛"和"加载了却什么都没注册"——**两种都躲得过正则**。
+
+---
+
+## 7. `C-x b` 的选择器
+
+`C-x b` 要的是一个**选择**，所以它不是 `prompt`，而是一个模态对话框：一个查询框，下面是它过滤出来的行。
+
+| 部分 | 在哪 | 为什么在那儿 |
+|---|---|---|
+| 行从哪来 | `pickerChoices(view)`：投影的 `contents` + 可实例化的 `types` | 渲染端不认识内容，只认识投影；核心因此不需要为这个 UI 加任何东西 |
+| 查询怎么排 | `matchChoices(choices, query)`：id/标题**完全相同** → 前缀 → 子串 → 子序列 | 人打 `dpr` 是想找 `document-preview`，打 `doc` 是想让文档预览排第一；同档保持列表原序，列表不会在光标下重排 |
+| 光标怎么动 | `pickerKey(state, choices, key)`：↑↓ 环绕，且始终被夹在**过滤后**的列表里 | 过滤让列表变短时，光标不能留在末尾之外 |
+| 选一行做什么 | `choiceGesture(choice, paneId)`：`open` 组 → `showContent`；`new` 组 → `createContent` | 组就是含义，不需要猜"这个名字是已经有的还是要新造的" |
+
+**它是模态的，而且这是刻意的。** 别处的规则是"输入框里也能用快捷键"（§2.2），因为那是为了不让人把手从键盘挪开；而这个对话框**本身就是**一次快捷键的收尾，所以它开着的期间每一次按键都属于查询：全局键层让位，对话框只留 ↑↓ / Enter / Esc（Esc 也由全局那一层兜住，因为点一下行会把焦点移出输入框）。
+
+空 frame 里那版选择器（§4/`createPicker`）用的是同一批行与同一个 `choiceGesture`，区别只是没有地方打字。

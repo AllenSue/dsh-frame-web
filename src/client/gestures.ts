@@ -129,12 +129,13 @@ export type FrameGesture =
   /** Make one new instance of a type and show it in a pane. */
   | { readonly kind: 'createContent'; readonly typeId: string; readonly paneId: PaneId }
   /**
-   * Bring a content up, by a name only the user can supply.
+   * Bring a content up, by a choice only the user can make.
    *
-   * `switch-to-buffer`, and the same shape as `savePresetAs`: the renderer asks
-   * for the name and resolves it to one of the two gestures above. Either answer
-   * is legitimate — naming something already made shows it, naming a type makes
-   * another one — which is why one chord covers both.
+   * `switch-to-buffer`, and the same shape as `savePresetAs`: the renderer asks,
+   * and resolves the answer to one of the two gestures above. Either answer is
+   * legitimate — choosing something already made shows it, choosing a type makes
+   * another one — which is why one chord covers both. How the asking is done is
+   * the renderer's business: `./picker.ts` owns the list and its query.
    */
   | { readonly kind: 'pickContent' }
 
@@ -155,42 +156,6 @@ export function nextPreset(
   if (presets.length === 0) return undefined
   const index = active === undefined ? -1 : presets.indexOf(active)
   return presets[(index + 1) % presets.length]
-}
-
-/**
- * What a typed answer means.
- *
- * One command covers "show me that" and "make me one", because a person naming
- * a thing should not have to say which it is. An exact id wins over a title, and
- * a content already made wins over making another — the same preference
- * `switch-to-buffer` has, and the one that does not quietly pile up duplicates.
- * @param answer - what the user typed.
- * @param context - the contents and types the shell knows.
- * @param paneId - the pane it would be shown in.
- * @returns the gesture, or `undefined` when nothing answers to that name.
- */
-export function pickContent(
-  answer: string,
-  context: GestureContext,
-  paneId: PaneId,
-): FrameGesture | undefined {
-  const wanted = answer.trim()
-  if (wanted === '') return undefined
-  const lower = wanted.toLowerCase()
-
-  const byId = context.contents.find((content) => content.id === wanted)
-  if (byId !== undefined) return { kind: 'showContent', paneId, contentId: byId.id }
-
-  const typeById = context.types.find((type) => type.id === wanted && type.instantiable)
-  if (typeById !== undefined) return { kind: 'createContent', paneId, typeId: typeById.id }
-
-  const byTitle = context.contents.find((content) => content.title.toLowerCase() === lower)
-  if (byTitle !== undefined) return { kind: 'showContent', paneId, contentId: byTitle.id }
-
-  const typeByTitle = context.types.find((type) => type.instantiable && type.title.toLowerCase() === lower)
-  return typeByTitle === undefined
-    ? undefined
-    : { kind: 'createContent', paneId, typeId: typeByTitle.id }
 }
 
 /**
