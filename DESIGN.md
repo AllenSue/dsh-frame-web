@@ -11,7 +11,7 @@
 |---|---|---|
 | 本包 | 把投影画成 DOM、指针命中判定、键位与手势、`localStorage` 里的预设 | 布局怎么算、治理怎么裁决、历史怎么记、`ui-layout` 的任何接口与槽键名 |
 
-**它做两件外壳上的事**：占 `root` 座位并声明 `frames.body` 这个 keyed 内容族；把 frame 自己的几何交给每个 body。
+**它做三件外壳上的事**：占 `root` 座位并声明 `frames.body` 这个 keyed 内容族；声明 `frames.overlay` 这个始终绘制的覆盖层座位；把 frame 自己的几何交给每个 body。
 
 **它做三件交互上的事**：指针 → 手势、键位 → 手势、手势 → **恰好一次**服务调用。
 
@@ -246,12 +246,15 @@ classDiagram
 
 ## 4. 座位与内容族
 
-注册进 `root` 的那一条**同时声明**了 `frames.body`：
+注册进 `root` 的那一条**同时声明**了两个子座位：
 
 ```ts
 ctx.slots.register({
   name: 'root', id: 'frames-layer', order: 100,
-  children: { 'frames.body': { kind: 'keyed', scope: 'root' } },
+  children: {
+    'frames.body': { kind: 'keyed', scope: 'root' },
+    'frames.overlay': { kind: 'list', scope: 'root' },
+  },
 }, FramesLayer)
 ```
 
@@ -264,6 +267,14 @@ ctx.slots.register({
 | `rect` | 归一化的自身面积——body 有时必须知道自己多宽（侧栏要画窄轨） |
 | `viewport` | 换算成自己的单位用；核心因此不需要知道单位是什么 |
 | `focused` | 这一格是否有焦点 |
+
+### 4.1 `frames.overlay`：不依赖任何 frame 的那一层
+
+`renderSlot('frames.overlay', {})` **无条件画一次**，位置在 pane 与分隔条之上、浮窗之下（`z-index: 2` 那一层），并且整层 `pointer-events: none`——占用者自己定位、自己把点击打开。
+
+它的存在理由只有一条，但它是硬需求：**有些内容必须在没有任何 frame 显示它的时候继续运行**。`frames.body` 是按"画出来的那一格 pane"取的，所以一个没有视图的内容在别处无处挂载。右栏就是活例子——它的占据者要在隐藏状态下上报"我想显示了"，而那一格 frame 正是因为这条上报才存在。
+
+这一层**不代表任何角色**：渲染端不知道谁注册进来、也不知道那是右栏。它只知道"这一层始终画"。
 
 ---
 
@@ -285,6 +296,6 @@ ctx.slots.register({
 | `keys.test.ts` | 输入框内触发、`C-x` 与剪切的冲突、未绑定的键不被吞、前导只活一次按键 |
 | `presets.test.ts` | 命名空间、坏条目读作不存在、两个 port 互不干扰 |
 | `tools/client-bundle.test.ts` | 构件是 factory-CJS、只 require `react`、无重复声明、核心名齐全 |
-| `tools/plugin-runtime.test.ts` | **在 vm 里真的跑构件**：装机、存一次、再装一次（模拟刷新）、把 body 的 owner props 抓出来断言 |
+| `tools/plugin-runtime.test.ts` | **在 vm 里真的跑构件**：装机、存一次、再装一次（模拟刷新）、把 body 的 owner props 抓出来断言、**断言 overlay 座位无论有没有 frame 都画一次** |
 
 > 最后两条的区别值得说：前者把构件当**文本**读，后者把构件当**代码**跑。这个项目踩过的坑里，真正伤人的是"构件能加载但一载入就抛"和"加载了却什么都没注册"——**两种都躲得过正则**。

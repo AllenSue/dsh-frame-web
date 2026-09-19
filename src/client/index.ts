@@ -278,6 +278,12 @@ function createPicker(
 function createLayer(controller: ReturnType<typeof createController>) {
   return function FramesLayer({ renderSlot }: {
     renderSlot(key: 'frames.body', owner: object, options: { entryKey: string }): unknown
+    /**
+     * The overlay seat. Unlike a body it is not tied to a frame: it is drawn
+     * whether or not any frame exists, which is what a content that nothing is
+     * displaying hangs on while it keeps running.
+     */
+    renderSlot(key: 'frames.overlay', owner: object): unknown
   }) {
     const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot)
     // The preview and the gesture live in this closure. Neither is in the model,
@@ -593,6 +599,17 @@ function createLayer(controller: ReturnType<typeof createController>) {
       },
     },
     createElement('div', { key: 'area', style: { position: 'relative', width: '100%', height: '100%' } }, frames, dividers),
+    // The overlay layer. It is drawn after the panes so an occupant here can
+    // cover the column it was given, and before the floating frames so a window
+    // still goes on top of it — the same order the shipped shell had, where the
+    // right column sat below the overlays and the overlays below the floats.
+    //
+    // The layer takes no pointer events of its own: an occupant positions itself
+    // and turns them back on for the part of the screen it actually covers.
+    createElement('div', {
+      key: 'overlay',
+      style: { position: 'absolute', inset: '0', zIndex: 2, pointerEvents: 'none' },
+    }, renderSlot('frames.overlay', {})),
     createElement('div', { key: 'floats', style: { position: 'relative', width: '100%', height: '100%', pointerEvents: 'none' } }, floats),
     preview === undefined ? null : createElement('div', {
       key: 'preview',
@@ -647,7 +664,15 @@ export function apply(ctx: {
         label: 'Frames',
         // Declaring the keyed body slot is what makes a frame type a content
         // family: a plugin supplies a body under that type's id.
-        children: { 'frames.body': { kind: 'keyed', scope: 'root' } },
+        //
+        // The overlay seat is its sibling, and it is deliberately not keyed by a
+        // type: it belongs to no frame, so an occupant registered here is drawn
+        // even while nothing displays it — a content that has to keep running
+        // with no window on it hangs on this.
+        children: {
+          'frames.body': { kind: 'keyed', scope: 'root' },
+          'frames.overlay': { kind: 'list', scope: 'root' },
+        },
       },
       createLayer(controller),
     )
