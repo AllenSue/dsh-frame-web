@@ -319,7 +319,7 @@ ctx.slots.register({
 
 | 部分 | 在哪 | 为什么在那儿 |
 |---|---|---|
-| 行从哪来 | `pickerChoices(view)`：投影的 `contents` + 可实例化的 `types` | 渲染端不认识内容，只认识投影；核心因此不需要为这个 UI 加任何东西 |
+| 行从哪来 | `pickerChoices(view)`：投影的 `contents` + 可实例化的 `types`，两边都滤掉 `placeable: false` | 渲染端不认识内容，只认识投影；核心因此不需要为这个 UI 加任何东西。而 `placeable` 是"**frame 画不画它**"：有些内容的拥有者自己把它画在别处（compat 的右栏面板挂在 overlay 座位上，占位的那一格画的是空盒子），列出来就是递给用户一个**空的 frame**（T25） |
 | 查询怎么排 | `matchChoices(choices, query)`：id/标题**完全相同** → 前缀 → 子串 → 子序列 | 人打 `dpr` 是想找 `document-preview`，打 `doc` 是想让文档预览排第一；同档保持列表原序，列表不会在光标下重排 |
 | 光标怎么动 | `pickerKey(state, choices, key)`：↑↓ 环绕，且始终被夹在**过滤后**的列表里 | 过滤让列表变短时，光标不能留在末尾之外 |
 | 选一行做什么 | `choiceGesture(choice, paneId)`：`open` 组 → **`showContent`**；`new` 组 → **`createContent`**——**两半都落在列表打开时所在的那一格** | 一格显示一个 content，所以"就显示在这一格"是一次**换掉**（旧内容放回注册表），不再是会被拒绝的问题：没有第二种 kind 可冲突，也没有可叠的 tab。Open 与 New 的区别只剩"已有的"和"新造的" |

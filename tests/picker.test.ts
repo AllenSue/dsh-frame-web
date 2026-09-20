@@ -14,12 +14,12 @@ import type { PickerChoice, PickerSource, PickerState } from '../src/client/pick
 /** What a shell might hold: two contents, and a type that cannot be made. */
 const SOURCE: PickerSource = {
   contents: [
-    { id: 'notes-7', title: 'Notes' },
-    { id: 'doc:readme.md', title: 'readme.md' },
+    { id: 'notes-7', title: 'Notes', placeable: true },
+    { id: 'doc:readme.md', title: 'readme.md', placeable: true },
   ],
   types: [
-    { id: 'legacy.conversation', title: 'Conversation', instantiable: false },
-    { id: 'editor', title: 'Editor', instantiable: true },
+    { id: 'legacy.conversation', title: 'Conversation', instantiable: false, placeable: true },
+    { id: 'editor', title: 'Editor', instantiable: true, placeable: true },
   ],
 }
 
@@ -36,6 +36,29 @@ test('the list offers what the shell holds and what can be made, in that order',
     // invitation to a refusal.
     { group: 'new', id: 'editor', title: 'Editor' },
   ])
+})
+
+test('a content no frame can draw is not offered, because the frame would be empty', () => {
+  // The compatibility layer's right column: its panel is drawn by the layer, and
+  // the frame that reserves the column's width draws an empty box. Offering it
+  // would hand the user a frame that shows nothing.
+  const choices = pickerChoices({
+    contents: [
+      { id: 'legacy.rightbar', title: 'Right panel', placeable: false },
+      { id: 'legacy.sidebar', title: 'Navigation', placeable: true },
+    ],
+    types: [
+      { id: 'legacy.rightbar', title: 'Right panel', instantiable: false, placeable: false },
+      { id: 'editor', title: 'Editor', instantiable: true, placeable: true },
+    ],
+  })
+
+  assert.deepEqual(choices, [
+    { group: 'open', id: 'legacy.sidebar', title: 'Navigation' },
+    { group: 'new', id: 'editor', title: 'Editor' },
+  ])
+  // And it is not reachable by typing either: the row was never in the list.
+  assert.deepEqual(matchChoices(choices, 'right'), [])
 })
 
 test('an empty query keeps every row in its own order', () => {
@@ -62,8 +85,8 @@ test('a query ranks an exact name, then a prefix, then anything containing it', 
 
 test('a scattered match is last, and is what makes shorthand work', () => {
   const choices = pickerChoices({
-    contents: [{ id: 'document-preview', title: 'Document preview' }],
-    types: [{ id: 'editor', title: 'Editor', instantiable: true }],
+    contents: [{ id: 'document-preview', title: 'Document preview', placeable: true }],
+    types: [{ id: 'editor', title: 'Editor', instantiable: true, placeable: true }],
   })
 
   // `dpr` reaches `document-preview` — no prefix or substring would.

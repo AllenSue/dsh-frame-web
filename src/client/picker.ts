@@ -31,8 +31,13 @@ export interface PickerChoice {
 
 /** What the picker lists: the parts of a projection it reads. */
 export interface PickerSource {
-  readonly contents: readonly { readonly id: string; readonly title: string }[]
-  readonly types: readonly { readonly id: string; readonly title: string; readonly instantiable: boolean }[]
+  readonly contents: readonly { readonly id: string; readonly title: string; readonly placeable: boolean }[]
+  readonly types: readonly {
+    readonly id: string
+    readonly title: string
+    readonly instantiable: boolean
+    readonly placeable: boolean
+  }[]
 }
 
 /** Where a row's name matched, best first. */
@@ -67,16 +72,24 @@ function rank(name: string, needle: string): number {
 
 /**
  * The rows the picker offers, in list order.
+ *
+ * Two things are left out, for the same reason: choosing a row has to do
+ * something visible. A type with no factory cannot be made; a type whose owner
+ * draws it elsewhere cannot be displayed by a frame at all — its body would be
+ * the empty box the compatibility layer's right column reserves, because the
+ * panel itself is mounted on the overlay layer and belongs to its occupant. Both
+ * are declarations the projection carries, so this list stays a reading of what
+ * the shell publishes.
  * @param source - the contents and types the projection publishes.
- * @returns what the shell holds, then what can be made — only the kinds a person
- *   can actually ask for, so an uninstantiable type is not an invitation to a
- *   refusal.
+ * @returns what the shell holds, then what can be made.
  */
 export function pickerChoices(source: PickerSource): readonly PickerChoice[] {
   return [
-    ...source.contents.map((content): PickerChoice => ({ group: 'open', id: content.id, title: content.title })),
+    ...source.contents
+      .filter((content) => content.placeable)
+      .map((content): PickerChoice => ({ group: 'open', id: content.id, title: content.title })),
     ...source.types
-      .filter((type) => type.instantiable)
+      .filter((type) => type.instantiable && type.placeable)
       .map((type): PickerChoice => ({ group: 'new', id: type.id, title: type.title })),
   ]
 }
