@@ -606,7 +606,11 @@ function createLayer(controller: ReturnType<typeof createController>) {
       )
     })
 
-    const dividers = view.dividers.map((divider) => createElement('div', {
+    // Only the dividers that can move are drawn: the core carries a fixed
+    // column's share over whatever a drag asks for, so offering a grab handle on
+    // its edge would be offering a gesture that does nothing to the boundary the
+    // pointer is holding (the projection says which ones those are).
+    const dividers = view.dividers.filter((divider) => divider.movable).map((divider) => createElement('div', {
       key: `${divider.splitId}:${divider.index}`,
       onPointerDown: (event: { preventDefault(): void; stopPropagation(): void; clientX: number; clientY: number }) => {
         event.preventDefault()
