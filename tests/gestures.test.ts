@@ -247,8 +247,7 @@ test('one gesture is one call on the frame service', async () => {
     [{ kind: 'applyPreset', name: 'work' }, ['applyPreset', 'work']],
     [{ kind: 'showContent', paneId: 'pane-1' as never, contentId: 'file-a' },
       ['showContent', 'pane-1', 'file-a']],
-    // `C-x b`'s answer: shown wherever it goes, so no pane is named.
-    [{ kind: 'openContent', contentId: 'file-a' }, ['openContent', 'file-a']],
+    // Both halves of `C-x b`'s answer land in the frame the list was opened over.
     [{ kind: 'createContent', typeId: 'editor', paneId: 'pane-1' as never },
       ['createContent', 'editor', 'pane-1']],
   ]
@@ -266,16 +265,17 @@ test('a refusal is handed to whoever can put it in front of the user', () => {
   const { service } = recorder()
   const refusing = {
     ...service,
-    openContent: () => fail('frames/kind-mismatch', 'that pane holds another kind of content'),
+    showContent: () => fail('frames/unknown-content', 'no content "file-a" is registered'),
   } as unknown as FramesService
   const seen: string[] = []
+  const swap = { kind: 'showContent', paneId: 'pane-1' as never, contentId: 'file-a' } as const
 
-  assert.equal(execute(refusing, { kind: 'openContent', contentId: 'file-a' }, (message) => { seen.push(message) }), false)
-  assert.deepEqual(seen, ['frames/kind-mismatch: that pane holds another kind of content'])
+  assert.equal(execute(refusing, swap, (message) => { seen.push(message) }), false)
+  assert.deepEqual(seen, ['frames/unknown-content: no content "file-a" is registered'])
 
   // An accepted gesture says nothing: there is nothing to explain.
   const accepted: string[] = []
-  assert.equal(execute(service, { kind: 'openContent', contentId: 'file-a' }, (message) => { accepted.push(message) }), true)
+  assert.equal(execute(service, swap, (message) => { accepted.push(message) }), true)
   assert.deepEqual(accepted, [])
 })
 

@@ -106,19 +106,13 @@ export function execute(
     case 'showContent':
       result = service.showContent(gesture.paneId, gesture.contentId)
       break
-    case 'openContent':
-      // No options: the core looks for a frame already showing it and focuses
-      // that one, or makes a new frame beside the current frame. A caller that
-      // needs it somewhere particular should say so with `showContent`.
-      result = service.openContent(gesture.contentId)
-      break
     case 'createContent':
       result = service.createContent(gesture.typeId, gesture.paneId)
       break
     case 'pickContent':
-      // Likewise: the name comes from the user, so the renderer resolves this
-      // into `openContent` or `createContent` before dispatching.
-      console.warn('[frames] a pick with no name reached execute; the renderer resolves it first')
+      // Likewise: the choice comes from the user, so the renderer resolves this
+      // into `showContent` or `createContent` before dispatching.
+      console.warn('[frames] a pick with no choice reached execute; the renderer resolves it first')
       return false
   }
   report(result, onRefused)

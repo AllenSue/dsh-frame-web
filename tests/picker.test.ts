@@ -82,15 +82,16 @@ test('a query that answers to nothing leaves nothing, rather than everything', (
   assert.deepEqual(matchChoices(choices, 'zzz'), [])
 })
 
-test('a row means what its group says it means', () => {
+test('a row means what its group says it means, and lands in the frame it was chosen in', () => {
   const pane = 'pane9' as PickerState['paneId']
 
-  // Open *shows* the content: no pane is named, because a pane holds one kind
-  // and the tree is the side that decides where this one can be displayed. This
-  // is the difference from the frame's own picker, which says "show it here".
+  // Open asks *this* frame to display the content — a swap, not a hunt for a
+  // frame already showing it. It went through `openContent` for one revision and
+  // that was wrong in a way a user found at once: an empty frame could not be
+  // filled by its own list, because the answer always landed somewhere else.
   assert.deepEqual(
     choiceGesture({ group: 'open', id: 'notes-7', title: 'Notes' }, pane),
-    { kind: 'openContent', contentId: 'notes-7' },
+    { kind: 'showContent', paneId: pane, contentId: 'notes-7' },
   )
   assert.deepEqual(
     choiceGesture({ group: 'new', id: 'editor', title: 'Editor' }, pane),

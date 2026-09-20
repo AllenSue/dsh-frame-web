@@ -107,26 +107,29 @@ export function matchChoices(choices: readonly PickerChoice[], query: string): r
  * holds, a row from New names a kind to make one of. That is the whole reason
  * the list carries groups rather than one flat set of names.
  *
- * Open goes through `openContent`, which *shows* the thing instead of asking one
- * particular pane to take it. A pane holds one kind of content, so "show this
- * here" is a question the tree is allowed to refuse — and in a shell whose centre
- * holds the conversation it refuses every other content there is, which is how
- * choosing a row came to do nothing at all. New names a pane, because making one
- * has to put it somewhere and the frame the user was in is the answer they
- * expect.
+ * **Both land in the frame the picker was opened over** — the one that had focus,
+ * or the empty frame whose own list this is. "Show it here" and "make one here"
+ * are what a person choosing from a list inside a frame means, and a frame now
+ * displays one content, so showing one here is a swap rather than a request the
+ * tree can refuse: there is no second kind to clash with, and nothing to stack.
+ *
+ * It briefly went through `openContent` instead, which shows a content *somewhere*
+ * — focus the frame already displaying it, or make a new one beside this. That
+ * reads well for a global switch and badly for this: an empty frame could never
+ * be filled by its own list, because the answer always landed somewhere else.
  * @param choice - the chosen row.
- * @param paneId - the pane a *new* instance lands in.
+ * @param paneId - the frame it lands in.
  * @returns the gesture to dispatch.
  */
 export function choiceGesture(choice: PickerChoice, paneId: PaneId): FrameGesture {
   return choice.group === 'open'
-    ? { kind: 'openContent', contentId: choice.id }
+    ? { kind: 'showContent', paneId, contentId: choice.id }
     : { kind: 'createContent', paneId, typeId: choice.id }
 }
 
 /** What the picker is showing: the list, the query, and where the cursor is. */
 export interface PickerState {
-  /** The pane a newly made instance lands in — the one focused when it opened. */
+  /** The frame a choice lands in — the one focused when it opened. */
   readonly paneId: PaneId
   readonly query: string
   /** Which visible row the cursor is on, counted over the *filtered* list. */
