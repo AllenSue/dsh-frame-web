@@ -55,6 +55,16 @@ const DIVIDER_GRAB = 7
 const ACCENT = '#6ea8fe'
 
 /**
+ * The hairline a boundary between two frames is drawn with.
+ *
+ * The token is the one the shipped shell's stylesheet names for exactly this
+ * (`AppFrame.module.css`: `border-right: 0.5px solid var(--dsw-alias-border-l3)`
+ * on the sidebar column), with the literal this renderer used before as the
+ * fallback for a shell that presents no theme.
+ */
+const DIVIDER_LINE = 'var(--dsw-alias-border-l3, #39404c)'
+
+/**
  * The app background, as the shipped shell's stylesheet names it.
  *
  * A frame draws no background of its own (see the pane renderer): whatever shows
@@ -642,39 +652,71 @@ function createLayer(controller: ReturnType<typeof createController>) {
       )
     })
 
-    // Only the dividers that can move are drawn: the core carries a fixed
-    // column's share over whatever a drag asks for, so offering a grab handle on
-    // its edge would be offering a gesture that does nothing to the boundary the
-    // pointer is holding (the projection says which ones those are).
-    const dividers = view.dividers.filter((divider) => divider.movable).map((divider) => createElement('div', {
-      key: `${divider.splitId}:${divider.index}`,
-      onPointerDown: (event: { preventDefault(): void; stopPropagation(): void; clientX: number; clientY: number }) => {
-        event.preventDefault()
-        stop(event)
-        begin({
-          kind: 'divider',
-          divider: {
-            splitId: divider.splitId,
-            axis: divider.axis,
-            index: divider.index,
-            sizes: divider.sizes,
-            parent: divider.parent,
-          },
-          from: at(event),
-        })
-      },
-      style: {
-        position: 'absolute',
-        boxSizing: 'border-box',
-        left: divider.axis === 'row' ? `calc(${divider.at * 100}% - ${DIVIDER_GRAB / 2}px)` : '0',
-        top: divider.axis === 'row' ? '0' : `calc(${divider.at * 100}% - ${DIVIDER_GRAB / 2}px)`,
-        width: divider.axis === 'row' ? `${DIVIDER_GRAB}px` : '100%',
-        height: divider.axis === 'row' ? '100%' : `${DIVIDER_GRAB}px`,
-        cursor: divider.axis === 'row' ? 'col-resize' : 'row-resize',
-        pointerEvents: 'auto',
-        zIndex: 2,
-      },
-    }))
+    // Every boundary, drawn once — and only a boundary a drag can move also gets
+    // something to grab.
+    //
+    // The frames themselves paint nothing (see the pane renderer), so this is
+    // where a boundary becomes visible: one hairline at the exact edge the two
+    // frames share, drawn on top of them (so it costs no layout and leaves no
+    // gap). A border on each frame gave two lines at every boundary; this gives
+    // one, which is what the shipped shell's single `border-right` on the sidebar
+    // column amounts to.
+    //
+    // The grab strip is a wider invisible box around the line, and it is only
+    // drawn where the core would let a drag move the boundary — a fixed column's
+    // edge has a line (the boundary is real) but no cursor and no handle, because
+    // the drag could not follow the pointer.
+    const dividers = view.dividers.flatMap((divider) => {
+      const along = divider.axis === 'row'
+      // The boundary is zero-thickness, so half the line sits in each neighbour:
+      // a hairline centred on the edge, not a line inside one of the frames.
+      const line = createElement('div', {
+        key: `${divider.splitId}:${divider.index}:line`,
+        style: {
+          position: 'absolute',
+          boxSizing: 'border-box',
+          pointerEvents: 'none',
+          zIndex: 1,
+          background: DIVIDER_LINE,
+          left: along ? `calc(${divider.rect.x * 100}% - 0.5px)` : `${divider.rect.x * 100}%`,
+          top: along ? `${divider.rect.y * 100}%` : `calc(${divider.rect.y * 100}% - 0.5px)`,
+          width: along ? '1px' : `${divider.rect.width * 100}%`,
+          height: along ? `${divider.rect.height * 100}%` : '1px',
+        },
+      })
+      if (!divider.movable) return [line]
+
+      const grab = createElement('div', {
+        key: `${divider.splitId}:${divider.index}:grab`,
+        onPointerDown: (event: { preventDefault(): void; stopPropagation(): void; clientX: number; clientY: number }) => {
+          event.preventDefault()
+          stop(event)
+          begin({
+            kind: 'divider',
+            divider: {
+              splitId: divider.splitId,
+              axis: divider.axis,
+              index: divider.index,
+              sizes: divider.sizes,
+              parent: divider.parent,
+            },
+            from: at(event),
+          })
+        },
+        style: {
+          position: 'absolute',
+          boxSizing: 'border-box',
+          left: along ? `calc(${divider.rect.x * 100}% - ${DIVIDER_GRAB / 2}px)` : `${divider.rect.x * 100}%`,
+          top: along ? `${divider.rect.y * 100}%` : `calc(${divider.rect.y * 100}% - ${DIVIDER_GRAB / 2}px)`,
+          width: along ? `${DIVIDER_GRAB}px` : `${divider.rect.width * 100}%`,
+          height: along ? `${divider.rect.height * 100}%` : `${DIVIDER_GRAB}px`,
+          cursor: along ? 'col-resize' : 'row-resize',
+          pointerEvents: 'auto',
+          zIndex: 2,
+        },
+      })
+      return [line, grab]
+    })
 
     const floats = view.floats.map((frame) => {
       const drawn = frame.rectHonoured
