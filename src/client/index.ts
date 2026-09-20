@@ -43,6 +43,28 @@ const CONVERSATION: FrameTypeDefinition = { id: 'legacy.conversation', title: ()
 const DIVIDER_GRAB = 7
 
 /**
+ * The colour of the focus ring, and of the refusal notice's border.
+ *
+ * Literal rather than a theme token: this renderer injects `slots` and nothing
+ * else, so it has no theme to read (a profile that wants the theme presented
+ * mounts the compatibility layer, which does it for the document). The app
+ * background below is the one exception, because the shipped shell's own
+ * stylesheet names it and a frame is transparent — the colour it shows through
+ * from has to be the shell's.
+ */
+const ACCENT = '#6ea8fe'
+
+/**
+ * The app background, as the shipped shell's stylesheet names it.
+ *
+ * A frame draws no background of its own (see the pane renderer): whatever shows
+ * through should be the same colour the rest of the client paints, so the token
+ * is read when a theme presenter has put it on the document. The literal is the
+ * value this shell used before it knew about tokens.
+ */
+const APP_BACKGROUND = 'var(--dsw-alias-bg-base, #14161a)'
+
+/**
  * The browser medium, when there is one.
  *
  * A non-browser boot of this bundle (a Node e2e composing the client tree) has
@@ -567,6 +589,7 @@ function createLayer(controller: ReturnType<typeof createController>) {
 
     const frames = view.docked.map((pane) => {
       const shown = pane.content
+      const focused = pane.id === view.active
       return createElement('div', {
         key: pane.id,
         // Focus follows a click anywhere in the frame, but the event is *not*
@@ -576,9 +599,22 @@ function createLayer(controller: ReturnType<typeof createController>) {
         style: {
           ...area(pane.rect),
           pointerEvents: 'auto',
-          background: '#1b1f26',
-          border: pane.id === view.active ? '1px solid #6ea8fe' : '1px solid #39404c',
-          borderRadius: '6px',
+          // A frame is a track, not a card.
+          //
+          // It used to be one: a background of its own, a border, rounded
+          // corners. Two frames side by side then showed two borders (a 2px
+          // seam), notched by the corner radii, and — worse — every occupant was
+          // surrounded by a band of the frame's colour, because a panel paints
+          // its own background and does not know it is inside one. The shipped
+          // shell draws no chrome at all (`AppFrame.module.css`: the centre
+          // column has no background and no border; the sidebar is a fill plus a
+          // half-pixel rule). So the frame is transparent and its content reaches
+          // the edges, which is what "no gap between frames" means.
+          //
+          // Focus still needs saying, since `C-x C-d`, `C-x o` and the picker all
+          // act on the focused frame: an inset ring, drawn inside the frame so it
+          // cannot shift the layout or sit in a gap of its own.
+          boxShadow: focused ? `inset 0 0 0 1px ${ACCENT}` : undefined,
           // A frame adds no inset of its own: the body draws its own and reaches
           // the frame's edges, so padding here would stop it filling the frame.
           display: 'flex',
@@ -713,7 +749,7 @@ function createLayer(controller: ReturnType<typeof createController>) {
         inset: '0',
         zIndex: 40,
         pointerEvents: 'auto',
-        background: '#14161a',
+        background: APP_BACKGROUND,
         color: '#d8dbe2',
         font: '13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace',
       },
