@@ -211,6 +211,14 @@ test('the preset chords name what they act on, and refuse when there is nothing 
   // Switching does: with an empty catalog there is nowhere to go, so the chord
   // is inert rather than an error.
   assert.equal(chordGesture('C-x s', CONTEXT), undefined)
+  // The list needs no preset to be *in use* — an empty catalog is a list that
+  // says so, which is better than `C-x s` doing nothing at all.
+  assert.equal(chordGesture('C-x p', CONTEXT)?.kind, 'pickPreset')
+  assert.equal(chordGesture('C-x p', withPresets)?.kind, 'pickPreset')
+  // Marking the startup preset does need one in use: there would be no name to
+  // store. The renderer says so on screen rather than storing a guess.
+  assert.equal(chordGesture('C-x C-p', CONTEXT)?.kind, 'toggleStartupPreset')
+  assert.equal(chordGesture('C-x C-p', withPresets)?.kind, 'toggleStartupPreset')
 })
 
 test('the content chord asks, and the asking is the picker\u2019s business', () => {

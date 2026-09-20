@@ -155,16 +155,20 @@ export interface PickerState {
  * Movement wraps, because a list this short has no edges worth guarding, and the
  * cursor is kept inside the filtered list rather than remembered across queries:
  * a filter that shortens the list must not leave the cursor past its end.
- * @param state - the picker as it stands.
+ *
+ * Generic over the state it is moving a cursor in, because the `C-x p` preset list
+ * is the same gesture over a different row type — there is no reason for the rule
+ * to know what a row is.
+ * @param state - the list's state, of which only `index` is touched.
  * @param choices - the rows the current query leaves.
  * @param key - the key that was pressed.
- * @returns the next state, or `undefined` when the picker leaves it alone.
+ * @returns the next state.
  */
-export function pickerKey(
-  state: PickerState,
-  choices: readonly PickerChoice[],
+export function pickerKey<T extends { readonly index: number }>(
+  state: T,
+  choices: readonly unknown[],
   key: 'up' | 'down',
-): PickerState {
+): T {
   if (choices.length === 0) return { ...state, index: 0 }
   const step = key === 'down' ? 1 : -1
   return { ...state, index: (state.index + step + choices.length) % choices.length }

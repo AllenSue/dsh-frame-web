@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 
 import type { Preset } from '../../frames/src/index.ts'
 import { PRESET_FORMAT_VERSION } from '../../frames/src/index.ts'
-import { createPresetPort, PRESET_KEY_PREFIX } from '../src/client/presets.ts'
+import { createPresetPort, nextStartup, PRESET_KEY_PREFIX, presetRows, readStartup, writeStartup } from '../src/client/presets.ts'
 import type { PresetStorage } from '../src/client/presets.ts'
 
 /** A `localStorage` stand-in: insertion-ordered, with the five members used. */
@@ -109,4 +109,57 @@ test('a custom namespace keeps two ports out of each other\'s way', async () => 
   assert.deepEqual(await first.list(), ['work'])
   assert.deepEqual(await second.list(), ['work'])
   assert.equal(store.entries.size, 2)
+})
+
+// ------------------------------------------------- the startup preference
+
+test('the startup preset is a name, and an empty one is no preference at all', () => {
+  const store = storage()
+
+  assert.equal(readStartup(store), undefined, 'nothing stored means no preference')
+  writeStartup(store, 'work')
+  assert.equal(readStartup(store), 'work')
+  // Whitespace is not a name: a preference that is a space would make the shell
+  // try to load a preset called " " at every boot.
+  store.setItem('dsh.frames.startup', '   ')
+  assert.equal(readStartup(store), undefined)
+
+  writeStartup(store, undefined)
+  assert.equal(readStartup(store), undefined, 'and clearing it is a removal')
+  assert.equal(store.entries.size, 0)
+})
+
+test('the startup preference shares the medium with the presets but not their keys', async () => {
+  const store = storage()
+  const port = createPresetPort(store)
+
+  writeStartup(store, 'work')
+  await port.write('work', preset('work'))
+
+  // The preference must not look like a preset to a catalog scan, or the shell
+  // would offer "dsh.frames.startup" as something to load.
+  assert.deepEqual(await port.list(), ['work'])
+  assert.equal(readStartup(store), 'work')
+})
+
+test('a list row says which preset is in use and which one is the startup preset', () => {
+  const rows = presetRows(['frontend', 'notes', 'work'], 'work', 'frontend')
+
+  assert.deepEqual(rows, [
+    { name: 'frontend', label: 'frontend  ·  startup' },
+    { name: 'notes', label: 'notes' },
+    { name: 'work', label: 'work  ·  in use' },
+  ])
+  // One preset can be both, and then it says both.
+  assert.deepEqual(
+    presetRows(['work'], 'work', 'work'),
+    [{ name: 'work', label: 'work  ·  in use · startup' }],
+  )
+})
+
+test('the startup chord is a toggle, and needs a preset in use to name one', () => {
+  assert.equal(nextStartup('work', undefined), 'work', 'marking the one in use')
+  assert.equal(nextStartup('work', 'work'), undefined, 'pressing it again takes the mark off')
+  assert.equal(nextStartup('work', 'other'), 'work', 'marking a different one moves the mark')
+  assert.equal(nextStartup(undefined, 'work'), undefined, 'with no preset in use there is nothing to mark')
 })

@@ -35,6 +35,7 @@ export type Chord =
   | 'C-x f' | 'C-x d'
   | 'C-x C-d'
   | 'C-x s' | 'C-x C-s'
+  | 'C-x p' | 'C-x C-p'
   | 'C-x b'
   | 'M-h' | 'M-j' | 'M-k' | 'M-l'
 
@@ -89,6 +90,7 @@ export function readChord(stroke: KeyStroke, prefix: boolean): Chord | undefined
     if (key === 'f') return 'C-x f'
     if (key === 'd') return stroke.ctrlKey ? 'C-x C-d' : 'C-x d'
     if (key === 's') return stroke.ctrlKey ? 'C-x C-s' : 'C-x s'
+    if (key === 'p') return stroke.ctrlKey ? 'C-x C-p' : 'C-x p'
     if (key === 'b' && !stroke.ctrlKey) return 'C-x b'
     // The arrow keys keep their `Arrow` name; the design writes them short.
     if (key === 'arrowright' || key === 'right') return 'C-x right'

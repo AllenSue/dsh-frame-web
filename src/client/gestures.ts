@@ -107,6 +107,21 @@ export type FrameGesture =
    * cannot silently drop it.
    */
   | { readonly kind: 'savePresetAs' }
+  /**
+   * Choose a preset from the catalog, by a choice only the user can make.
+   *
+   * The same shape as `savePresetAs` and `pickContent`: the renderer asks and
+   * resolves the answer to `applyPreset`. `C-x s` cycles the catalog blind, which
+   * is fine for two presets and useless for six — this is the one that shows them.
+   */
+  | { readonly kind: 'pickPreset' }
+  /**
+   * Mark the preset in force as the one to open on, or unmark it.
+   *
+   * A gesture rather than a direct write, because what it does depends on which
+   * preset is in force — which is the service's answer, not the key layer's.
+   */
+  | { readonly kind: 'toggleStartupPreset' }
   /** Show a content in a pane, replacing what that frame was displaying. */
   | { readonly kind: 'showContent'; readonly paneId: PaneId; readonly contentId: string }
   /** Make one new instance of a type and show it in a pane — the same swap. */
@@ -171,6 +186,8 @@ export function chordGesture(chord: Chord, context: GestureContext): FrameGestur
         ? undefined
         : { kind: 'close', paneId: context.activePaneId }
     case 'C-x C-s': return { kind: 'savePresetAs' }
+    case 'C-x C-p': return { kind: 'toggleStartupPreset' }
+    case 'C-x p': return { kind: 'pickPreset' }
     case 'C-x b': return { kind: 'pickContent' }
     case 'C-x s': {
       const name = nextPreset(context.presets, context.activePreset)

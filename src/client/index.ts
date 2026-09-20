@@ -28,7 +28,7 @@ import { decideKey, hasSelection, isEditing } from './keys.ts'
 import type { TypingTarget } from './keys.ts'
 import { choiceGesture, matchChoices, pickerChoices, pickerKey } from './picker.ts'
 import type { PickerChoice, PickerState } from './picker.ts'
-import { createPresetPort } from './presets.ts'
+import { createPresetPort, nextStartup, presetRows, readStartup, writeStartup } from './presets.ts'
 import type { PresetStorage } from './presets.ts'
 import { execute } from './execute.ts'
 import type { Executed } from './execute.ts'
@@ -81,14 +81,32 @@ const APP_BACKGROUND = 'var(--dsw-alias-bg-base, #14161a)'
  * no `localStorage`, and a shell without presets is a shell that refuses the two
  * preset chords — not a shell that fails to start.
  */
-function presetPort(): ReturnType<typeof createPresetPort> | undefined {
+function presetMedium(): PresetStorage | undefined {
   try {
-    return typeof localStorage === 'undefined' ? undefined : createPresetPort(localStorage as PresetStorage)
+    return typeof localStorage === 'undefined' ? undefined : localStorage as PresetStorage
   } catch {
     // Reaching `localStorage` can throw outright when a document is sandboxed
     // without `allow-same-origin`.
     return undefined
   }
+}
+
+/**
+ * The preset port, when there is a medium.
+ *
+ * A non-browser boot of this bundle (a Node e2e composing the client tree) has no
+ * `localStorage`, and a shell without presets is a shell that refuses the preset
+ * chords — not a shell that fails to start.
+ */
+function presetPort(): ReturnType<typeof createPresetPort> | undefined {
+  const medium = presetMedium()
+  return medium === undefined ? undefined : createPresetPort(medium)
+}
+
+/** The preset this shell should open on, if the user named one and it is still there. */
+function startupPreset(): string | undefined {
+  const medium = presetMedium()
+  return medium === undefined ? undefined : readStartup(medium)
 }
 
 /**
@@ -282,24 +300,38 @@ interface PickerDialogProps {
   close(): void
 }
 
+/** What every modal list in this layer needs: a query, a cursor, and a way out. */
+interface ListDialogProps {
+  readonly query: string
+  readonly index: number
+  readonly placeholder: string
+  /** The line under the list, saying what the keys do and what the marks mean. */
+  readonly hint: string
+  setQuery(query: string): void
+  move(key: 'up' | 'down'): void
+  hover(index: number): void
+  /** Take the row the cursor is on. */
+  choose(): void
+  close(): void
+}
+
 /**
- * The `C-x b` dialog.
+ * The chrome every one of this layer's lists is drawn in.
  *
- * A query box over the list it filters, because the alternative — a browser
- * `prompt` — asks a person to remember a name and type it exactly. The list is
- * the answer to "what is there", and the query is how it is narrowed.
+ * A query box over the rows it filters, because the alternative — a browser
+ * `prompt` — asks a person to remember a name and type it exactly. The list is the
+ * answer to "what is there", and the query is how it is narrowed.
  *
  * It is a modal on purpose. Chords otherwise work everywhere, typing fields
  * included; here every keystroke belongs to the query, so the key layer stands
  * down while this is open and the box keeps only what it needs: arrows, Enter,
- * and Escape.
- * @param props - the query, the rows it leaves, and what the keys do.
+ * and Escape. Escape is also handled by the key layer, because clicking a row
+ * moves focus out of the input.
+ * @param props - the query, the cursor, and what the keys do.
+ * @param children - the list itself, already filtered and rendered.
  * @returns the dialog.
  */
-function createPickerDialog({
-  state, choices, setQuery, move, hover, choose, close,
-}: PickerDialogProps): unknown {
-  const chosen = choices[state.index]
+function createListDialog(props: ListDialogProps, ...children: unknown[]): unknown {
   const stop = (event: { stopPropagation(): void }): void => { event.stopPropagation() }
 
   const onKeyDown = (event: {
@@ -307,26 +339,85 @@ function createPickerDialog({
     readonly shiftKey: boolean
     preventDefault(): void
   }): void => {
-    if (event.key === 'ArrowDown' || (event.key === 'Tab' && !event.shiftKey)) {
-      event.preventDefault()
-      move('down')
-      return
-    }
-    if (event.key === 'ArrowUp' || (event.key === 'Tab' && event.shiftKey)) {
-      event.preventDefault()
-      move('up')
-      return
-    }
-    if (event.key === 'Enter') {
-      event.preventDefault()
-      choose(chosen)
-      return
-    }
-    if (event.key === 'Escape') {
-      event.preventDefault()
-      close()
+    const handled = (act: () => void): void => { event.preventDefault(); act() }
+    switch (event.key) {
+      case 'ArrowDown': handled(() => { props.move('down') }); return
+      case 'ArrowUp': handled(() => { props.move('up') }); return
+      case 'Tab': handled(() => { props.move(event.shiftKey ? 'up' : 'down') }); return
+      case 'Enter': handled(() => { props.choose() }); return
+      case 'Escape': handled(() => { props.close() })
     }
   }
+
+  return createElement('div', {
+    key: 'dialog',
+    onPointerDown: props.close,
+    style: {
+      position: 'fixed',
+      inset: '0',
+      zIndex: 60,
+      display: 'flex',
+      alignItems: 'flex-start',
+      justifyContent: 'center',
+      background: 'rgba(10, 12, 16, .55)',
+      pointerEvents: 'auto',
+    },
+  },
+  createElement('div', {
+    key: 'panel',
+    onPointerDown: stop,
+    style: {
+      marginTop: '12vh',
+      width: 'min(560px, 90vw)',
+      maxHeight: '60vh',
+      display: 'flex',
+      flexDirection: 'column',
+      background: '#1b1f26',
+      border: '1px solid #4a5364',
+      borderRadius: '8px',
+      boxShadow: '0 12px 32px rgba(0,0,0,.5)',
+      overflow: 'hidden',
+    },
+  },
+  createElement('input', {
+    key: 'query',
+    autoFocus: true,
+    value: props.query,
+    placeholder: props.placeholder,
+    spellCheck: false,
+    onChange: (event: { target: { value: string } }) => { props.setQuery(event.target.value) },
+    onKeyDown,
+    style: {
+      flex: '0 0 auto',
+      padding: '10px 12px',
+      background: 'transparent',
+      border: 'none',
+      borderBottom: '1px solid #39404c',
+      color: '#e6e9ef',
+      font: 'inherit',
+      outline: 'none',
+    },
+  }),
+  createElement('div', {
+    key: 'list',
+    style: { flex: '1 1 auto', minHeight: '0', overflowY: 'auto', padding: '4px' },
+  }, ...children),
+  createElement('div', {
+    key: 'hint',
+    style: { flex: '0 0 auto', padding: '6px 12px', borderTop: '1px solid #39404c', color: '#98a1b0', fontSize: '11px' },
+  }, props.hint),
+  ))
+}
+
+/**
+ * The `C-x b` dialog: the content list, over the chrome every list shares.
+ * @param props - the query, the rows it leaves, and what the keys do.
+ * @returns the dialog.
+ */
+function createPickerDialog({
+  state, choices, setQuery, move, hover, choose, close,
+}: PickerDialogProps): unknown {
+  const chosen = choices[state.index]
 
   const row = (choice: PickerChoice, index: number): unknown => {
     const on = index === state.index
@@ -361,70 +452,88 @@ function createPickerDialog({
         entries.map((entry) => row(entry.choice, entry.index)))
   }
 
-  return createElement('div', {
-    key: 'picker',
-    onPointerDown: close,
-    style: {
-      position: 'fixed',
-      inset: '0',
-      zIndex: 60,
-      display: 'flex',
-      alignItems: 'flex-start',
-      justifyContent: 'center',
-      background: 'rgba(10, 12, 16, .55)',
-      pointerEvents: 'auto',
+  return createListDialog(
+    {
+      query: state.query,
+      index: state.index,
+      placeholder: 'Show content…',
+      hint: '↑↓ move · Enter open · Esc close',
+      setQuery,
+      move,
+      hover,
+      choose: () => { choose(chosen) },
+      close,
     },
-  },
-  createElement('div', {
-    key: 'panel',
-    onPointerDown: stop,
-    style: {
-      marginTop: '12vh',
-      width: 'min(560px, 90vw)',
-      maxHeight: '60vh',
-      display: 'flex',
-      flexDirection: 'column',
-      background: '#1b1f26',
-      border: '1px solid #4a5364',
-      borderRadius: '8px',
-      boxShadow: '0 12px 32px rgba(0,0,0,.5)',
-      overflow: 'hidden',
+    choices.length === 0
+      ? createElement('div', { key: 'empty', style: { padding: '10px 12px', color: '#98a1b0' } },
+        state.query.trim() === ''
+          ? 'Nothing to show: no plugin has registered a content or a type.'
+          : `Nothing matches “${state.query.trim()}”.`)
+      : [section('Open', 'open'), section('New', 'new')],
+  )
+}
+
+/** What the `C-x p` dialog needs: the rows, already labelled with their marks. */
+interface PresetDialogProps {
+  readonly rows: readonly PickerChoice[]
+  readonly query: string
+  readonly index: number
+  setQuery(query: string): void
+  move(key: 'up' | 'down'): void
+  hover(index: number): void
+  /** Load the preset on the row the cursor is on. */
+  choose(): void
+  close(): void
+}
+
+/**
+ * The `C-x p` dialog: the presets the medium holds.
+ *
+ * `C-x s` cycles the catalog blind, which is fine for two presets and useless for
+ * six. This shows them, with the two marks that make the preferences legible: the
+ * one in use, and the one the shell opens on. Everything else — the query, the
+ * cursor, Enter, Escape — is the same chrome the content list uses.
+ * @param props - the catalog and the two marks.
+ * @returns the dialog.
+ */
+function createPresetDialog({
+  rows, query, index, setQuery, move, hover, choose, close,
+}: PresetDialogProps): unknown {
+  const visible = matchChoices(rows, query)
+
+  return createListDialog(
+    {
+      query,
+      index,
+      placeholder: 'Load preset…',
+      hint: '↑↓ move · Enter load · Esc close · C-x C-p marks the startup preset',
+      setQuery,
+      move,
+      hover,
+      choose,
+      close,
     },
-  },
-  createElement('input', {
-    key: 'query',
-    autoFocus: true,
-    value: state.query,
-    placeholder: 'Show content…',
-    spellCheck: false,
-    onChange: (event: { target: { value: string } }) => { setQuery(event.target.value) },
-    onKeyDown,
-    style: {
-      flex: '0 0 auto',
-      padding: '10px 12px',
-      background: 'transparent',
-      border: 'none',
-      borderBottom: '1px solid #39404c',
-      color: '#e6e9ef',
-      font: 'inherit',
-      outline: 'none',
-    },
-  }),
-  createElement('div', {
-    key: 'list',
-    style: { flex: '1 1 auto', minHeight: '0', overflowY: 'auto', padding: '4px' },
-  },
-  choices.length === 0
-    ? createElement('div', { key: 'empty', style: { padding: '10px 12px', color: '#98a1b0' } },
-      state.query.trim() === ''
-        ? 'Nothing to show: no plugin has registered a content or a type.'
-        : `Nothing matches “${state.query.trim()}”.`)
-    : [section('Open', 'open'), section('New', 'new')]),
-  createElement('div', {
-    key: 'hint',
-    style: { flex: '0 0 auto', padding: '6px 12px', borderTop: '1px solid #39404c', color: '#98a1b0', fontSize: '11px' },
-  }, '↑↓ move · Enter open · Esc close'),
-  ))
+    visible.length === 0
+      ? createElement('div', { key: 'empty', style: { padding: '10px 12px', color: '#98a1b0' } },
+        rows.length === 0
+          ? 'No presets yet: C-x C-s saves this layout under a name.'
+          : `Nothing matches “${query.trim()}”.`)
+      : visible.map((row, at) => createElement('div', {
+        key: row.id,
+        onPointerEnter: () => { hover(at) },
+        onClick: () => { if (at === index) choose() },
+        style: {
+          cursor: 'pointer',
+          padding: '6px 10px',
+          borderRadius: '4px',
+          background: at === index ? '#2b3442' : 'transparent',
+          color: at === index ? '#e6e9ef' : '#c3c9d4',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        },
+      }, row.title)),
+  )
 }
 
 /**
@@ -454,6 +563,11 @@ function createLayer(controller: ReturnType<typeof createController>) {
     const [picker, setPicker] = useState<PickerState | undefined>(undefined)
     const pickerOpen = useRef(false)
     pickerOpen.current = picker !== undefined
+    // The `C-x p` preset list, held the same way and for the same reason. `active`
+    // is read once when it opens: the marks are about the layout as it stood.
+    const [presetList, setPresetList] = useState<{ query: string; index: number } | undefined>(undefined)
+    const presetListOpen = useRef(false)
+    presetListOpen.current = presetList !== undefined
     // Why the last thing that did nothing did nothing. A refused operation is
     // never silent — the console is not where the user is looking.
     const [notice, setNotice] = useState<string | undefined>(undefined)
@@ -514,14 +628,15 @@ function createLayer(controller: ReturnType<typeof createController>) {
       }
 
       const onKey = (event: KeyboardEvent): void => {
-        // The picker is modal: every keystroke belongs to its query box, so the
-        // chords stand down while it is open. Escape still closes it here rather
+        // Both lists are modal: every keystroke belongs to the query box, so the
+        // chords stand down while one is open. Escape still closes it here rather
         // than only in the box, because a click on a row can take the focus out
         // of that box.
-        if (pickerOpen.current) {
+        if (pickerOpen.current || presetListOpen.current) {
           if (event.key === 'Escape') {
             event.preventDefault()
             setPicker(undefined)
+            setPresetList(undefined)
           }
           return
         }
@@ -562,6 +677,28 @@ function createLayer(controller: ReturnType<typeof createController>) {
           const paneId = controller.context().activePaneId
           if (paneId === undefined) return
           setPicker({ paneId, query: '', index: 0 })
+          return
+        }
+        // And the third: `C-x p` lists the presets, and the row the user takes
+        // becomes an `applyPreset` — the same one `C-x s` sends without asking.
+        if (gesture.kind === 'pickPreset') {
+          setPresetList({ query: '', index: 0 })
+          return
+        }
+        // `C-x C-p` needs no dialog, but it does need the service's answer about
+        // which preset is in force, and the medium the preference lives in.
+        if (gesture.kind === 'toggleStartupPreset') {
+          const active = controller.activePreset()
+          const medium = presetMedium()
+          if (active === undefined || medium === undefined) {
+            setNotice('no preset is in use: C-x C-s saves this layout under a name')
+            return
+          }
+          const next = nextStartup(active, readStartup(medium))
+          writeStartup(medium, next)
+          setNotice(next === undefined
+            ? 'this shell will start on no preset'
+            : `this shell will start on “${next}”`)
           return
         }
         run(gesture)
@@ -784,6 +921,16 @@ function createLayer(controller: ReturnType<typeof createController>) {
       )
     })
 
+    // What the `C-x p` list shows: every preset the catalog holds, in name order,
+    // each labelled with the two marks that matter (in use, startup). Read on every
+    // render rather than cached, because saving a preset adds a row.
+    const presetCatalog = presetRows(
+      controller.context().presets,
+      controller.activePreset(),
+      startupPreset(),
+    ).map((row) => ({ group: 'open' as const, id: row.name, title: row.label }))
+    const visiblePresets = presetList === undefined ? [] : matchChoices(presetCatalog, presetList.query)
+
     return createElement('div', {
       style: {
         position: 'fixed',
@@ -856,6 +1003,23 @@ function createLayer(controller: ReturnType<typeof createController>) {
       },
       close: () => { setPicker(undefined) },
     }),
+    // The `C-x p` dialog, drawn the same way. The marks are read here rather than
+    // kept in state: which preset is in use is the service's answer, and which one
+    // is the startup preset is the medium's.
+    presetList === undefined ? null : createPresetDialog({
+      rows: presetCatalog,
+      query: presetList.query,
+      index: presetList.index,
+      setQuery: (query) => { setPresetList({ query, index: 0 }) },
+      move: (key) => { setPresetList(pickerKey(presetList, visiblePresets, key)) },
+      hover: (index) => { setPresetList({ ...presetList, index }) },
+      choose: () => {
+        const chosen = visiblePresets[presetList.index]
+        setPresetList(undefined)
+        if (chosen !== undefined) run({ kind: 'applyPreset', name: chosen.id })
+      },
+      close: () => { setPresetList(undefined) },
+    }),
     )
   }
 }
@@ -886,8 +1050,15 @@ export function apply(ctx: {
     const controller = createController(service)
     // The catalog is read once at mount; a preset written by another tab, or by
     // a target that shares the medium, shows up on the next reload rather than
-    // costing a poll.
-    void service.refreshPresets().catch(() => undefined)
+    // costing a poll. The startup preference is honoured right after — through the
+    // same funnel every other change uses — and a preference naming a preset that
+    // has since been deleted is no preference at all, which is why the catalog is
+    // read first.
+    void service.refreshPresets().then(() => {
+      const startup = startupPreset()
+      if (startup === undefined || !service.presetNames().includes(startup)) return undefined
+      return execute(service, { kind: 'applyPreset', name: startup })
+    }).catch(() => undefined)
     const dropLayer = ctx.slots.register(
       {
         // `root` is the runtime's built-in slot, so this takes the window rather

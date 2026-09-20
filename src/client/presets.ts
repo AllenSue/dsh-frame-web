@@ -72,3 +72,80 @@ export function createPresetPort(
     },
   }
 }
+
+/** Where "load this one when the shell starts" is kept. One name, one entry. */
+export const STARTUP_KEY = 'dsh.frames.startup'
+
+/**
+ * The preset this shell should open on, if the user has named one.
+ *
+ * A preference of its own rather than a flag inside a preset: it says which record
+ * to *read* at boot, so it has to be readable without reading any of them — and a
+ * name that no longer exists is the same as no preference at all (the shell then
+ * opens the way a shell with no presets does, instead of failing to start).
+ * @param storage - the medium.
+ * @param key - the entry; defaults to this plugin's.
+ * @returns the preset's name, or `undefined` when there is none.
+ */
+export function readStartup(storage: PresetStorage, key: string = STARTUP_KEY): string | undefined {
+  const raw = storage.getItem(key)
+  const name = raw === null ? '' : raw.trim()
+  return name === '' ? undefined : name
+}
+
+/**
+ * Remember which preset to open on, or forget it.
+ * @param storage - the medium.
+ * @param name - the preset's name; `undefined` clears the preference.
+ * @param key - the entry; defaults to this plugin's.
+ */
+export function writeStartup(storage: PresetStorage, name: string | undefined, key: string = STARTUP_KEY): void {
+  if (name === undefined) storage.removeItem(key)
+  else storage.setItem(key, name)
+}
+
+/** One row of the preset list, as the dialog draws it. */
+export interface PresetRow {
+  readonly name: string
+  /** What the row says: the name, with what it is marked as. */
+  readonly label: string
+}
+
+/**
+ * The rows the preset dialog offers, in the order the catalog holds them.
+ *
+ * The marks are the whole reason this is a function and not a map: `C-x s` cycles
+ * blind, so a list that did not say which preset is **in use** and which one is
+ * the **startup** one would leave the user setting a preference with no feedback.
+ * @param names - the catalog, in name order.
+ * @param active - the preset in force, if any.
+ * @param startup - the preset the shell opens on, if any.
+ * @returns one row per preset.
+ */
+export function presetRows(
+  names: readonly string[],
+  active: string | undefined,
+  startup: string | undefined,
+): readonly PresetRow[] {
+  return names.map((name) => {
+    const marks = [
+      name === active ? 'in use' : undefined,
+      name === startup ? 'startup' : undefined,
+    ].filter((mark): mark is string => mark !== undefined)
+    return { name, label: marks.length === 0 ? name : `${name}  ·  ${marks.join(' · ')}` }
+  })
+}
+
+/**
+ * What `C-x C-p` should store.
+ *
+ * A toggle rather than "set": the same chord has to be able to undo itself, since
+ * the key map has no other way to say "do not load anything at startup".
+ * @param active - the preset in force, if any. Without one there is nothing to mark.
+ * @param startup - the preset currently marked, if any.
+ * @returns the name to store, or `undefined` to clear the preference.
+ */
+export function nextStartup(active: string | undefined, startup: string | undefined): string | undefined {
+  if (active === undefined) return undefined
+  return active === startup ? undefined : active
+}

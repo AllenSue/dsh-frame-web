@@ -114,6 +114,16 @@ export function execute(
       // into `showContent` or `createContent` before dispatching.
       console.warn('[frames] a pick with no choice reached execute; the renderer resolves it first')
       return false
+    case 'pickPreset':
+      // The renderer lists the catalog and dispatches `applyPreset` with the name
+      // the user picked; `C-x s` is the same intent without the asking.
+      console.warn('[frames] a preset pick reached execute; the renderer resolves it first')
+      return false
+    case 'toggleStartupPreset':
+      // Also the renderer's: it is the side that holds the medium the preference
+      // lives in, and what to store depends on which preset the *service* is on.
+      console.warn('[frames] a startup toggle reached execute; the renderer writes it')
+      return false
   }
   report(result, onRefused)
   return result.ok
